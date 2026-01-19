@@ -1,0 +1,219 @@
+UMLS Search recommendations
+You're absolutely right - let me give you a general approach for any search term across all domains:
+Recommended General Search Strategy:
+1. Cast a wide net with intelligent defaults
+javascriptasync function searchUMLS(searchTerm) {
+  const response = await fetch(
+    `https://uts-ws.nlm.nih.gov/rest/search/current?` +
+    `string=${encodeURIComponent(searchTerm)}` +
+    `&searchType=words` +  // or normalizedWords for fuzzy matching
+    `&pageSize=100` +      // Get more results per page
+    `&returnIdType=concept` // Return CUIs
+  );
+  
+  return await response.json();
+}
+2. Fetch multiple pages and sort client-side
+javascriptasync function searchAndSort(searchTerm, options = {}) {
+  const {
+    maxPages = 5,           // Get first 5 pages (500 results)
+    sortBy = 'alphabetical', // 'alphabetical', 'relevance', or 'source'
+    vocabularies = null      // Optional: filter by vocabularies
+  } = options;
+  
+  let allResults = [];
+  
+  // Fetch multiple pages in parallel for speed
+  const pagePromises = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const url = new URL('https://uts-ws.nlm.nih.gov/rest/search/current');
+    url.searchParams.set('string', searchTerm);
+    url.searchParams.set('pageNumber', page);
+    url.searchParams.set('pageSize', 100);
+    if (vocabularies) {
+      url.searchParams.set('sabs', vocabularies.join(','));
+    }
+    
+    pagePromises.push(
+      fetch(url, { headers: { 'Authorization': `Bearer ${apiKey}` }})
+        .then(r => r.json())
+    );
+  }
+  
+  const responses = await Promise.all(pagePromises);
+  
+  // Combine all results
+  responses.forEach(data => {
+    if (data.result?.results) {
+      allResults = allResults.concat(data.result.results);
+    }
+  });
+  
+  // Sort based on preference
+  if (sortBy === 'alphabetical') {
+    allResults.sort((a, b) => a.name.localeCompare(b.name));
+  } else if (sortBy === 'source') {
+    allResults.sort((a, b) => {
+      // Sort by source, then by name within source
+      if (a.rootSource !== b.rootSource) {
+        return a.rootSource.localeCompare(b.rootSource);
+      }
+      return a.name.localeCompare(b.name);
+    });
+  }
+  // If 'relevance', keep API's default order
+  
+  // Remove duplicates (same CUI might appear multiple times)
+  const uniqueResults = Array.from(
+    new Map(allResults.map(item => [item.ui, item])).values()
+  );
+  
+  return uniqueResults;
+}
+3. Provide user controls in the UI
+javascript// In your UI
+<SearchBar onSearch={handleSearch} />
+
+<SearchControls>
+  <SortDropdown 
+    options={['Relevance (Default)', 'Alphabetical', 'By Source']}
+    onChange={setSortPreference}
+  />
+  
+  <PageSizeControl 
+    value={resultsPerPage}
+    onChange={setResultsPerPage}
+  />
+</SearchControls>
+
+<ResultsList results={sortedResults} />
+4. Progressive loading with virtual scrolling
+javascript// For very long lists, use virtual scrolling
+// Load and render results as user scrolls
+function SearchResults({ results }) {
+  return (
+    <VirtualizedList
+      itemCount={results.length}
+      itemSize={60}
+      height={600}
+      renderItem={({ index, style }) => (
+        <div style={style}>
+          <ResultRow result={results[index]} />
+        </div>
+      )}
+    />
+  );
+}
+5. Add search hints/autocomplete
+javascript// Help users refine searches without being too specific
+async function getSearchSuggestions(partialTerm) {
+  if (partialTerm.length < 3) return [];
+  
+  const results = await searchUMLS(partialTerm);
+  
+  // Return top 10 as suggestions
+  return results.result.results.slice(0, 10).map(r => r.name);
+}
+Complete Example:
+javascriptclass UMLSSearcher {
+  constructor(apiKey, defaultSort = 'alphabetical') {
+    this.apiKey = apiKey;
+    this.defaultSort = defaultSort;
+  }
+  
+  async search(term, options = {}) {
+    const {
+      sort = this.defaultSort,
+      maxResults = 500,
+      vocabularies = null
+    } = options;
+    
+    const pageSize = 100;
+    const maxPages = Math.ceil(maxResults / pageSize);
+    
+    // Fetch multiple pages
+    const results = await this.fetchMultiplePages(term, maxPages, vocabularies);
+    
+    // Sort
+    return this.sortResults(results, sort);
+  }
+  
+  async fetchMultiplePages(term, maxPages, vocabularies) {
+    const pages = Array.from({ length: maxPages }, (_, i) => i + 1);
+    
+    const promises = pages.map(page => 
+      this.fetchPage(term, page, vocabularies)
+    );
+    
+    const responses = await Promise.all(promises);
+    
+    // Flatten and deduplicate
+    const allResults = responses.flat();
+    return this.deduplicate(allResults);
+  }
+  
+  async fetchPage(term, pageNumber, vocabularies) {
+    const url = new URL('https://uts-ws.nlm.nih.gov/rest/search/current');
+    url.searchParams.set('string', term);
+    url.searchParams.set('pageNumber', pageNumber);
+    url.searchParams.set('pageSize', 100);
+    if (vocabularies) {
+      url.searchParams.set('sabs', vocabularies.join(','));
+    }
+    
+    const response = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${this.apiKey}` }
+    });
+    
+    const data = await response.json();
+    return data.result?.results || [];
+  }
+  
+  sortResults(results, sortBy) {
+    const sorted = [...results];
+    
+    switch(sortBy) {
+      case 'alphabetical':
+        sorted.sort((a, b) => a.name.localeCompare(b.name));
+        break;
+      case 'source':
+        sorted.sort((a, b) => {
+          if (a.rootSource !== b.rootSource) {
+            return a.rootSource.localeCompare(b.rootSource);
+          }
+          return a.name.localeCompare(b.name);
+        });
+        break;
+      // 'relevance' keeps original order
+    }
+    
+    return sorted;
+  }
+  
+  deduplicate(results) {
+    return Array.from(
+      new Map(results.map(item => [item.ui, item])).values()
+    );
+  }
+}
+
+// Usage
+const searcher = new UMLSSearcher(apiKey, 'alphabetical');
+
+// User types "diabetes"
+const results = await searcher.search('diabetes', {
+  sort: 'alphabetical',  // User can change in UI
+  maxResults: 500
+});
+
+// Now "Diabetes Mellitus, Type 2" will appear alphabetically
+// regardless of where API ranked it
+Key Benefits:
+
+Not too specific - searches across all domains and vocabularies
+Alphabetical sorting - "Type 2 Diabetes" will appear in predictable location
+User control - they can toggle between relevance and alphabetical
+Scalable - fetches enough results (500) to find what they need
+Fast - parallel page fetching
+
+This gives users the flexibility to find terms easily without you having to know their search intent ahead of time!

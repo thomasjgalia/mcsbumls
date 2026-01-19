@@ -1,0 +1,276 @@
+I’m considering a “lightweight” approach for my use case. Application that allows a user to search, navigate and generate code sets. Using umls api would remove the need for omop tables and updating every 6 months.
+
+Jan 17
+That's a smart approach! Using the UMLS API directly as a "lightweight" solution has several advantages for your use case. Let me think through the tradeoffs:
+
+Advantages of API-Only Approach:
+No Infrastructure Overhead:
+
+No database tables to maintain
+No 6-month update cycles to manage
+No storage costs for OMLS tables
+No ETL pipelines to build and maintain
+Always Current:
+
+API reflects the latest UMLS release automatically
+NLM handles all updates transparently
+You get new vocabularies and corrections immediately
+Simpler Architecture:
+
+Just your application + UMLS API calls
+Cache responses for performance (12-24 hours as NLM recommends)
+Store only the final code sets users generate
+Lower Barrier to Entry:
+
+Start building immediately with just an API key
+No need to download/process 35 GB of data
+Faster development cycle
+Considerations:
+Performance:
+
+API calls have latency (though caching helps significantly)
+For heavy usage, you'll hit the 20 req/sec limit
+Large descendant sets (30k rows) require pagination
+Dependency:
+
+Reliant on NLM API availability
+Need internet connectivity
+Subject to any future API changes
+Caching Strategy:
+
+Implement Redis or similar for response caching
+Cache search results, hierarchy data, and frequently accessed descendants
+This mitigates performance concerns significantly
+Recommended Hybrid Approach:
+Use UMLS API for search and navigation
+Cache heavily to improve performance and stay under rate limits
+Store only the generated code sets (the output of user selections) in your Azure SQL DB
+Optional: Cache popular hierarchy branches locally to reduce API calls
+This gives you the "lightweight" benefits while maintaining good performance. For a code set generation tool where users are interactively exploring (not running massive batch queries), the API approach is very viable.
+
+Does your application expect high concurrent usage, or is it more of an internal tool for a smaller team?
+
+Do drug terms have information like drug class, dose form, route of administration. Ingredient(s) etc?
+
+Jan 17
+
+RxNorm UMLS drug attributes dose form route administration ingredient
+10 results
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yes! RxNorm drug concepts contain very rich, structured information. Here's what's available:
+
+Information Embedded in Drug Concepts:
+1. Ingredients:
+
+RxNorm normalized names contain information on ingredients, strengths, and dose forms 
+Wikipedia
+Relationships like "has_ingredient" link clinical drugs to their active ingredients
+Multi-ingredient drugs are fully decomposed
+2. Dose Form:
+
+Dose forms (TTY=DF) can be grouped by route of administration or dose form type using dose form groups (TTY=DFG) 
+NCBI
+Examples: Oral Tablet, Injectable Solution, Topical Cream, etc.
+3. Strength:
+
+Normalized strength values with units (e.g., "500 MG")
+For multi-ingredient drugs, strengths for each ingredient
+4. Route of Administration:
+
+RxNorm dose form reflects the presumed route that the drug is formulated to be administered 
+National Library of Medicine
+Embedded in the dose form (e.g., "Oral" from "Oral Tablet")
+5. Drug Class:
+
+You can get drug classes through:
+ATC classification (via RxClass API or UMLS relationships)
+VA drug classes
+Therapeutic categories from other vocabularies
+Relationships showing "isa" hierarchies (e.g., "is a penicillin")
+How It's Structured:
+Term Types (TTY) organize the hierarchy:
+
+IN = Ingredient (e.g., "Acetaminophen")
+SCDC = Semantic Clinical Drug Component (ingredient + strength)
+DF = Dose Form (e.g., "Oral Tablet")
+SCD = Semantic Clinical Drug (ingredient + strength + dose form)
+SBD = Semantic Branded Drug (SCD + brand name)
+Example hierarchy:
+
+Acetaminophen [IN - Ingredient]
+  └─ Acetaminophen 500 MG [SCDC - Component]
+      └─ Acetaminophen 500 MG Oral Tablet [SCD - Clinical Drug]
+          └─ Acetaminophen 500 MG Oral Tablet [Tylenol] [SBD - Branded Drug]
+Using the UMLS/RxNorm API:
+You can retrieve all this through:
+
+Relationships (ingredient relationships, form relationships)
+Attributes (strength, NDC codes, etc.)
+RxClass API for drug classifications (ATC, VA classes, therapeutic categories)
+So yes, when a user searches for a drug, you can display all these components and navigate through ingredient hierarchies, dose form variations, and drug classifications!
+
+Could you program conditional logic so that if a drug term is selected, it would kick off those any additional api to get that information?
+
+Jan 17
+Absolutely! Here's how you'd program that conditional logic:
+
+Approach:
+1. Detect Drug Domain After Search When the user selects a term from search results, check the vocabulary and/or semantic type:
+
+javascript
+// After user selects a term
+async function handleTermSelection(selectedTerm) {
+  // Check if it's a drug-related vocabulary
+  const drugVocabularies = ['RXNORM', 'NDC', 'ATC'];
+  const isDrug = drugVocabularies.includes(selectedTerm.vocabulary);
+  
+  // Or check semantic type from UMLS
+  // Semantic types like: "Pharmacologic Substance", "Clinical Drug"
+  
+  if (isDrug) {
+    // Trigger drug-specific API calls
+    await fetchDrugDetails(selectedTerm);
+  } else {
+    // Show standard hierarchy navigation
+    await fetchStandardHierarchy(selectedTerm);
+  }
+}
+2. Parallel API Calls for Drug Details
+
+javascript
+async function fetchDrugDetails(drugTerm) {
+  try {
+    // Make parallel API calls for efficiency
+    const [
+      ingredients,
+      doseForm,
+      drugClasses,
+      relationships
+    ] = await Promise.all([
+      // RxNorm API: Get ingredients
+      fetch(`https://rxnav.nlm.nih.gov/REST/rxcui/${drugTerm.rxcui}/related.json?tty=IN`),
+      
+      // Get dose form info
+      fetch(`https://rxnav.nlm.nih.gov/REST/rxcui/${drugTerm.rxcui}/property.json?propName=DOSE_FORM`),
+      
+      // RxClass API: Get ATC classifications
+      fetch(`https://rxnav.nlm.nih.gov/REST/rxclass/class/byRxcui.json?rxcui=${drugTerm.rxcui}&relaSource=ATC`),
+      
+      // UMLS API: Get all relationships for strength, route, etc.
+      fetch(`https://uts-ws.nlm.nih.gov/rest/content/current/CUI/${drugTerm.cui}/relations`, {
+        headers: { 'Authorization': `Bearer ${apiKey}` }
+      })
+    ]);
+    
+    // Parse and display results
+    return {
+      ingredients: await ingredients.json(),
+      doseForm: await doseForm.json(),
+      drugClasses: await drugClasses.json(),
+      relationships: await relationships.json()
+    };
+    
+  } catch (error) {
+    console.error('Error fetching drug details:', error);
+  }
+}
+3. Conditional UI Display
+
+javascript
+function displayTermDetails(term, isDrug, drugDetails) {
+  if (isDrug && drugDetails) {
+    // Show drug-specific UI panel
+    return `
+      <div class="drug-details">
+        <h3>${term.name}</h3>
+        
+        <section>
+          <h4>Ingredients</h4>
+          ${drugDetails.ingredients.map(i => `<li>${i.name}</li>`).join('')}
+        </section>
+        
+        <section>
+          <h4>Dose Form</h4>
+          <p>${drugDetails.doseForm}</p>
+        </section>
+        
+        <section>
+          <h4>Drug Classifications</h4>
+          ${drugDetails.drugClasses.map(c => 
+            `<li>${c.classId} - ${c.className}</li>`
+          ).join('')}
+        </section>
+        
+        <section>
+          <h4>Hierarchy Navigation</h4>
+          <!-- Standard ancestor/descendant navigation -->
+        </section>
+      </div>
+    `;
+  } else {
+    // Show standard term details
+    return standardTermView(term);
+  }
+}
+Smart Optimizations:
+Cache drug metadata:
+
+javascript
+const drugCache = new Map();
+
+async function fetchDrugDetails(drugTerm) {
+  const cacheKey = `drug_${drugTerm.rxcui}`;
+  
+  // Check cache first (24-hour TTL as NLM recommends)
+  if (drugCache.has(cacheKey)) {
+    const cached = drugCache.get(cacheKey);
+    if (Date.now() - cached.timestamp < 24 * 60 * 60 * 1000) {
+      return cached.data;
+    }
+  }
+  
+  // Fetch if not cached
+  const data = await fetchFromAPIs();
+  drugCache.set(cacheKey, { data, timestamp: Date.now() });
+  return data;
+}
+Progressive loading:
+
+javascript
+// Show basic info immediately, load details progressively
+async function handleTermSelection(term) {
+  // Immediate display
+  displayBasicInfo(term);
+  
+  if (isDrugTerm(term)) {
+    // Show loading indicator
+    showLoadingIndicator('drug-details-panel');
+    
+    // Fetch in background
+    const details = await fetchDrugDetails(term);
+    
+    // Update UI when ready
+    updateDrugDetailsPanel(details);
+  }
+}
+This approach gives you intelligent, conditional logic that automatically enriches drug terms with relevant pharmaceutical information while keeping other medical terms simple.
