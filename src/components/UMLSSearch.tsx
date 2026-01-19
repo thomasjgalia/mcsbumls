@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import { Search, Loader2, GitBranch, CheckCircle2, ChevronDown, ChevronRight } from 'lucide-react';
-import { searchUMLS, getConceptDetails, getAncestors, getDescendants, getRxNormToNDC } from '../lib/api';
+import { Search, Loader2, GitBranch, CheckCircle2, ChevronDown, ChevronRight, Play, Download } from 'lucide-react';
+import { searchUMLS, getConceptDetails, getAncestors, getDescendants, getRxNormToNDC, getRxNormAttributes } from '../lib/api';
 import type { UMLSSearchResult } from '../lib/types';
 
 // Vocabularies that support hierarchy navigation
@@ -24,10 +24,24 @@ const STANDARD_VOCABULARIES = {
   observation: 'SNOMEDCT_US'     // General observations
 };
 
-// Domain to vocabulary mapping (UMLS source abbreviations)
-// These define which vocabularies are relevant for each medical domain
-// Used for BOTH search filtering AND code set building
-const DOMAIN_VOCABULARIES_MAP = {
+// All vocabularies to search across (UMLS source abbreviations)
+const ALL_SEARCH_VOCABULARIES = [
+  'ICD10CM',
+  'SNOMEDCT_US',
+  'ICD9CM',
+  'LNC',
+  'CPT',
+  'HCPCS',
+  'RXNORM',
+  'NDC',
+  'CVX',
+  'ATC',
+  'ICD9PCS',
+  'ICD10PCS'
+];
+
+// Domain to vocabulary mapping (used only for code set building)
+const BUILD_DOMAIN_VOCABULARIES = {
   condition: ['ICD10CM', 'SNOMEDCT_US', 'ICD9CM'],
   observation: ['ICD10CM', 'SNOMEDCT_US', 'LNC', 'CPT', 'HCPCS'],
   drug: ['NDC', 'RXNORM', 'CPT', 'CVX', 'HCPCS', 'ATC'],
@@ -35,8 +49,14 @@ const DOMAIN_VOCABULARIES_MAP = {
   procedure: ['CPT', 'HCPCS', 'SNOMEDCT_US', 'ICD9PCS', 'LNC', 'ICD10PCS']
 };
 
-// Legacy alias for backward compatibility with build code
-const BUILD_DOMAIN_VOCABULARIES = DOMAIN_VOCABULARIES_MAP;
+// Display labels for build domains
+const BUILD_DOMAIN_CONFIG = {
+  condition: { label: 'Condition', icon: '🏥' },
+  observation: { label: 'Observation', icon: '👁️' },
+  drug: { label: 'Drug', icon: '💊' },
+  measurement: { label: 'Measurement', icon: '📊' },
+  procedure: { label: 'Procedure', icon: '⚕️' }
+};
 
 // Domain to vocabulary mapping for UI display/grouping
 const DOMAIN_VOCABULARIES = {
@@ -78,7 +98,7 @@ const SEMANTIC_TYPE_TO_DOMAIN: Record<string, string> = {
   'T061': 'procedure', // Therapeutic or Preventive Procedure
 };
 
-// Domain display configuration
+// Domain display configuration for grouping atoms in UI
 const DOMAIN_CONFIG = {
   disease: { label: 'Disease Codes', icon: '🏥', color: 'blue' },
   drug: { label: 'Medication Codes', icon: '💊', color: 'purple' },
@@ -86,18 +106,6 @@ const DOMAIN_CONFIG = {
   procedure: { label: 'Procedure Codes', icon: '⚕️', color: 'orange' },
   vaccine: { label: 'Vaccine Codes', icon: '💉', color: 'pink' }
 };
-
-// Domain display configuration for UI
-const DOMAIN_CONFIG_UI = {
-  condition: { label: 'Condition', description: 'ICD10CM, SNOMED, ICD9CM', icon: '🏥' },
-  observation: { label: 'Observation', description: 'ICD10CM, SNOMED, LOINC, CPT, HCPCS', icon: '👁️' },
-  drug: { label: 'Drug', description: 'NDDF, RxNorm, CPT, CVX, HCPCS, ATC', icon: '💊' },
-  measurement: { label: 'Measurement', description: 'LOINC, CPT, SNOMED, HCPCS', icon: '📊' },
-  procedure: { label: 'Procedure', description: 'CPT, HCPCS, SNOMED, ICD9PCS, LOINC, ICD10PCS', icon: '⚕️' }
-};
-
-// Legacy alias for backward compatibility
-const BUILD_DOMAIN_CONFIG = DOMAIN_CONFIG_UI;
 
 export default function UMLSSearch() {
   const [searchTerm, setSearchTerm] = useState('');
@@ -114,12 +122,15 @@ export default function UMLSSearch() {
   const [loadingBuild, setLoadingBuild] = useState(false);
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(new Set());
   const [sortBy, setSortBy] = useState<'relevance' | 'alphabetical'>('relevance');
-  const [searchDomain, setSearchDomain] = useState<keyof typeof DOMAIN_VOCABULARIES_MAP>('condition');
   const [selectedBuildDomain, setSelectedBuildDomain] = useState<keyof typeof BUILD_DOMAIN_VOCABULARIES>('condition');
   const [buildProgress, setBuildProgress] = useState<{current: number, total: number, phase: string} | null>(null);
   const [showWarningModal, setShowWarningModal] = useState(false);
   const [pendingBuildNode, setPendingBuildNode] = useState<any>(null);
   const [estimatedDescendants, setEstimatedDescendants] = useState<number>(0);
+  const [showAncestors, setShowAncestors] = useState(false);
+  const [showDescendants, setShowDescendants] = useState(false);
+  const [buildFilterText, setBuildFilterText] = useState('');
+  const [buildFilterVocabularies, setBuildFilterVocabularies] = useState<string[]>([]);
 
   // Determine current step based on state
   const getCurrentStep = () => {
@@ -131,6 +142,75 @@ export default function UMLSSearch() {
   };
 
   const currentStep = getCurrentStep();
+
+  // Filter build codes based on search text and vocabulary selection
+  const getFilteredBuildCodes = () => {
+    if (!buildData?.allCodes) return [];
+
+    let filtered = [...buildData.allCodes];
+
+    // Apply text filter (only if 3 or more characters)
+    if (buildFilterText.trim().length >= 3) {
+      const searchLower = buildFilterText.toLowerCase();
+      filtered = filtered.filter((code: any) =>
+        (code.cui || '').toLowerCase().includes(searchLower) ||
+        (code.code || '').toLowerCase().includes(searchLower) ||
+        (code.term || '').toLowerCase().includes(searchLower) ||
+        (code.vocabulary || '').toLowerCase().includes(searchLower)
+      );
+    }
+
+    // Apply vocabulary filter
+    if (buildFilterVocabularies.length > 0) {
+      filtered = filtered.filter((code: any) =>
+        buildFilterVocabularies.includes(code.vocabulary)
+      );
+    }
+
+    // Sort by Vocabulary first, then by Code
+    return filtered.sort((a, b) => {
+      const vocabCompare = (a.vocabulary || '').localeCompare(b.vocabulary || '');
+      if (vocabCompare !== 0) return vocabCompare;
+      return (a.code || '').localeCompare(b.code || '');
+    });
+  };
+
+  // Get unique vocabularies from build data
+  const getAvailableVocabularies = (): string[] => {
+    if (!buildData?.allCodes) return [];
+    const vocabs = new Set(buildData.allCodes.map((code: any) => code.vocabulary));
+    return Array.from(vocabs).sort() as string[];
+  };
+
+  // Toggle vocabulary filter
+  const toggleVocabularyFilter = (vocab: string) => {
+    setBuildFilterVocabularies(prev =>
+      prev.includes(vocab)
+        ? prev.filter(v => v !== vocab)
+        : [...prev, vocab]
+    );
+  };
+
+  // Export filtered codes to tab-delimited .txt file
+  const exportToTxt = () => {
+    const filteredCodes = getFilteredBuildCodes();
+
+    // Create tab-delimited content: Vocabulary [tab] Code
+    const content = filteredCodes
+      .map((code: any) => `${code.vocabulary}\t${code.code}`)
+      .join('\n');
+
+    // Create blob and download
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `code-set-${buildData?.rootNode?.ui || 'export'}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   // Helper: Get standard vocabulary for a domain
   const getStandardVocabularyForDomain = (domain: keyof typeof STANDARD_VOCABULARIES): string => {
@@ -262,16 +342,16 @@ export default function UMLSSearch() {
     setRawResponse(null);
 
     try {
-      // Get vocabularies for the selected domain
-      const domainVocabularies = DOMAIN_VOCABULARIES_MAP[searchDomain];
-
+      // Search across all vocabularies
+      console.log('[SEARCH] Searching for:', searchTerm.trim());
       const response = await searchUMLS({
         searchTerm: searchTerm.trim(),
-        vocabularies: domainVocabularies,
+        vocabularies: ALL_SEARCH_VOCABULARIES,
         pageSize: 50,
         sortBy: sortBy,
       });
 
+      console.log('[SEARCH] Response:', response);
       setResults(response.data);
       setRawResponse(response);
     } catch (err) {
@@ -282,17 +362,16 @@ export default function UMLSSearch() {
     }
   };
 
-  // Re-search when sort order or domain changes
+  // Re-search when sort order changes
   useEffect(() => {
     if (results.length > 0 && searchTerm.trim()) {
-      // Re-trigger search with new sort order or domain
+      // Re-trigger search with new sort order
       const reSearch = async () => {
         setLoading(true);
         try {
-          const domainVocabularies = DOMAIN_VOCABULARIES_MAP[searchDomain];
           const response = await searchUMLS({
             searchTerm: searchTerm.trim(),
-            vocabularies: domainVocabularies,
+            vocabularies: ALL_SEARCH_VOCABULARIES,
             pageSize: 50,
             sortBy: sortBy,
           });
@@ -306,7 +385,7 @@ export default function UMLSSearch() {
       };
       reSearch();
     }
-  }, [sortBy, searchDomain]);
+  }, [sortBy]);
 
   const handleViewDetails = async (cui: string) => {
     setLoadingDetails(true);
@@ -314,9 +393,8 @@ export default function UMLSSearch() {
     setSelectedAtom(null);
     setExpandedDomains(new Set()); // Reset expanded domains
     try {
-      // Filter atoms by selected domain vocabularies
-      const domainVocabularies = DOMAIN_VOCABULARIES_MAP[searchDomain];
-      const details = await getConceptDetails(cui, domainVocabularies);
+      // Fetch atoms from all vocabularies
+      const details = await getConceptDetails(cui, ALL_SEARCH_VOCABULARIES);
       setSelectedConcept(details);
 
       // Auto-expand primary domain
@@ -427,7 +505,7 @@ export default function UMLSSearch() {
     code: string,
     visited = new Set<string>(),
     onProgress?: (current: number, phase: string) => void
-  ): Promise<Array<{vocabulary: string, code: string, term: string}>> => {
+  ): Promise<Array<{vocabulary: string, code: string, term: string, termType?: string}>> => {
     // Special handling for RxNorm: NO RECURSION
     // RxNav API returns bidirectional relationships (SCD<->SBD) causing cycles
     // Just get all related codes in one call, no recursion needed
@@ -440,7 +518,8 @@ export default function UMLSSearch() {
         return immediateDescendants.map(desc => ({
           vocabulary,
           code: desc.code || desc.ui,
-          term: desc.name
+          term: desc.name,
+          termType: (desc as any).termType
         }));
       } catch (err) {
         console.error(`[RXNORM FLAT] Error fetching related codes:`, err);
@@ -471,7 +550,7 @@ export default function UMLSSearch() {
         console.log(`[RECURSIVE] → First descendant structure:`, immediateDescendants[0]);
       }
 
-      const allDescendants: Array<{vocabulary: string, code: string, term: string}> = [];
+      const allDescendants: Array<{vocabulary: string, code: string, term: string, termType?: string}> = [];
 
       // Process each immediate descendant
       for (const desc of immediateDescendants) {
@@ -488,6 +567,7 @@ export default function UMLSSearch() {
         }
 
         const descTerm = desc.name;
+        const descTermType = (desc as any).termType;
 
         if (!descCode) {
           console.warn(`[RECURSIVE] → Skipping descendant with no code:`, desc);
@@ -506,7 +586,8 @@ export default function UMLSSearch() {
         allDescendants.push({
           vocabulary,
           code: descCode,
-          term: descTerm
+          term: descTerm,
+          termType: descTermType
         });
 
         // Recursively get descendants of this descendant (grandchildren, great-grandchildren, etc.)
@@ -547,14 +628,25 @@ export default function UMLSSearch() {
 
       try {
         // Fetch the source code to get its CUI
-        const saiUrl = `https://uts-ws.nlm.nih.gov/rest/content/current/source/${vocabulary}/${code}?apiKey=${apiKey}`;
+        const saiUrl = `https://uts-ws.nlm.nih.gov/rest/content/2025AB/source/${vocabulary}/${code}?apiKey=${apiKey}`;
+        console.log(`[CUI CONVERT] Fetching source: ${vocabulary}/${code}`);
         const saiResponse = await fetch(saiUrl);
 
         if (saiResponse.ok) {
           const saiData = await saiResponse.json();
           const atomsUrl = saiData.result.atoms;
+          console.log(`[CUI CONVERT] Atoms URL: ${atomsUrl}`);
 
-          const atomsResponse = await fetch(`${atomsUrl}?apiKey=${apiKey}`);
+          if (atomsUrl === 'NONE') {
+            console.log(`[CUI CONVERT] No atoms for ${vocabulary}/${code}`);
+            continue;
+          }
+
+          const atomsRequestUrl = `${atomsUrl}?apiKey=${apiKey}`;
+          console.log(`[CUI CONVERT] Fetching atoms from: ${atomsRequestUrl.replace(apiKey, 'XXX')}`);
+          const atomsResponse = await fetch(atomsRequestUrl);
+          console.log(`[CUI CONVERT] Atoms response status: ${atomsResponse.status}`);
+
           if (atomsResponse.ok) {
             const atomsData = await atomsResponse.json();
             if (atomsData.result && atomsData.result.length > 0) {
@@ -563,10 +655,15 @@ export default function UMLSSearch() {
               const cui = conceptUri?.split('/').pop();
 
               if (cui && cui.startsWith('C')) {
+                console.log(`[CUI CONVERT] ✓ Found CUI: ${cui} for ${vocabulary}/${code}`);
                 cuis.add(cui);
               }
             }
+          } else {
+            console.log(`[CUI CONVERT] Failed to fetch atoms: ${atomsResponse.status} ${atomsResponse.statusText}`);
           }
+        } else {
+          console.log(`[CUI CONVERT] Failed to fetch source: ${saiResponse.status} ${saiResponse.statusText}`);
         }
       } catch (error) {
         console.error(`Error converting ${vocabulary}/${code} to CUI:`, error);
@@ -622,11 +719,35 @@ export default function UMLSSearch() {
     }
   };
 
+  // Helper: Auto-detect domain from vocabulary
+  const getDomainFromVocabulary = (vocabulary: string): keyof typeof BUILD_DOMAIN_VOCABULARIES => {
+    // Map vocabularies to their primary domains
+    const vocabToDomain: Record<string, keyof typeof BUILD_DOMAIN_VOCABULARIES> = {
+      'RXNORM': 'drug',
+      'NDC': 'drug',
+      'CVX': 'drug',
+      'SNOMEDCT_US': 'condition',
+      'ICD10CM': 'condition',
+      'ICD9CM': 'condition',
+      'LNC': 'measurement',
+      'CPT': 'procedure',
+      'HCPCS': 'procedure',
+      'ICD10PCS': 'procedure',
+      'ICD9PCS': 'procedure',
+      'ATC': 'drug'
+    };
+
+    return vocabToDomain[vocabulary] || 'condition'; // default to condition if unknown
+  };
+
   // Pre-flight check before building
   const handleBuildClick = async (node: any) => {
     // Use source code if available, otherwise fall back to AUI
     const code = node.code || node.ui;
     const vocabulary = hierarchyData.atom.rootSource;
+
+    // Auto-detect domain from vocabulary
+    const detectedDomain = getDomainFromVocabulary(vocabulary);
 
     // Show loading state while estimating
     setLoadingBuild(true);
@@ -643,12 +764,12 @@ export default function UMLSSearch() {
 
       if (estimate > WARNING_THRESHOLD) {
         // Show warning modal
-        setPendingBuildNode(node);
+        setPendingBuildNode({ ...node, detectedDomain });
         setShowWarningModal(true);
         setLoadingBuild(false);
       } else {
-        // Proceed directly
-        await handleBuildFromHierarchyNode(node);
+        // Proceed directly with detected domain
+        await handleBuildFromHierarchyNode(node, detectedDomain);
       }
     } catch (err) {
       console.error('Error estimating descendants:', err);
@@ -661,7 +782,8 @@ export default function UMLSSearch() {
   const confirmAndBuild = async () => {
     setShowWarningModal(false);
     if (pendingBuildNode) {
-      await handleBuildFromHierarchyNode(pendingBuildNode);
+      const { detectedDomain, ...node } = pendingBuildNode;
+      await handleBuildFromHierarchyNode(node, detectedDomain);
       setPendingBuildNode(null);
     }
   };
@@ -796,7 +918,16 @@ export default function UMLSSearch() {
 
           // Add all atoms from this concept (already filtered by API)
           if (conceptDetails.atoms && conceptDetails.atoms.length > 0) {
-            conceptDetails.atoms.forEach((atom: any) => {
+            for (const atom of conceptDetails.atoms) {
+              // Construct public UMLS browser URL instead of using REST API URL
+              const publicUrl = `https://uts.nlm.nih.gov/uts/umls/concept/${cui}`;
+
+              // Fetch RxNorm attributes by parsing the drug name
+              let rxnormAttrs = {};
+              if (atom.rootSource === 'RXNORM' || atom.rootSource === 'NDC') {
+                rxnormAttrs = await getRxNormAttributes(cui, atom.name);
+              }
+
               crossVocabResults.push({
                 cui: cui,
                 conceptName: conceptDetails.concept.name,
@@ -804,9 +935,10 @@ export default function UMLSSearch() {
                 code: atom.actualCode || atom.code,
                 vocabulary: atom.rootSource,
                 term: atom.name,
-                codeUrl: atom.codeUrl,
+                codeUrl: publicUrl,
+                ...rxnormAttrs
               });
-            });
+            }
           }
 
           // Update progress
@@ -877,7 +1009,7 @@ export default function UMLSSearch() {
 
                 // Get CUI for this descendant code
                 const apiKey = import.meta.env.VITE_UMLS_API_KEY;
-                const saiUrl = `https://uts-ws.nlm.nih.gov/rest/content/current/source/${desc.vocabulary}/${desc.code}?apiKey=${apiKey}`;
+                const saiUrl = `https://uts-ws.nlm.nih.gov/rest/content/2025AB/source/${desc.vocabulary}/${desc.code}?apiKey=${apiKey}`;
                 const saiResponse = await fetch(saiUrl);
 
                 if (saiResponse.ok) {
@@ -896,12 +1028,24 @@ export default function UMLSSearch() {
                         // Fetch concept details to get concept name
                         const descConceptDetails = await getConceptDetails(descCui, [desc.vocabulary]);
 
+                        // Construct public UMLS browser URL
+                        const publicUrl = `https://uts.nlm.nih.gov/uts/umls/concept/${descCui}`;
+
+                        // Fetch RxNorm attributes by parsing the drug name if this is an RxNorm code
+                        let rxnormAttrs = {};
+                        if (desc.vocabulary === 'RXNORM') {
+                          rxnormAttrs = await getRxNormAttributes(descCui, desc.term);
+                        }
+
                         hierarchicalExpansion.push({
                           cui: descCui,
                           conceptName: descConceptDetails.concept.name,
                           code: desc.code,
                           vocabulary: desc.vocabulary,
                           term: desc.term,
+                          termType: desc.termType,
+                          codeUrl: publicUrl,
+                          ...rxnormAttrs
                         });
                       }
                     }
@@ -931,16 +1075,24 @@ export default function UMLSSearch() {
         });
 
         const ndcResults: any[] = [];
-        const rxnormCodes = allCodesBeforeDedup.filter(item => item.vocabulary === 'RXNORM');
+        const allRxnormCodes = allCodesBeforeDedup.filter(item => item.vocabulary === 'RXNORM');
 
-        console.log(`[NDC MAPPING] Found ${rxnormCodes.length} RxNorm codes to map to NDC`);
+        // Deduplicate RxNorm codes before fetching NDCs (to avoid fetching same RXCUI multiple times)
+        const rxnormCodes = Array.from(
+          new Map(allRxnormCodes.map(item => [item.code, item])).values()
+        );
+
+        console.log(`[NDC MAPPING] Found ${allRxnormCodes.length} RxNorm codes (${rxnormCodes.length} unique) to map to NDC`);
 
         let processedRxNorm = 0;
         for (const rxnormCode of rxnormCodes) {
           try {
-            const ndcCodes = await getRxNormToNDC(rxnormCode.code);
+            const ndcCodes = await getRxNormToNDC(rxnormCode.code, rxnormCode.cui);
 
             ndcCodes.forEach((ndc: any) => {
+              // Construct UMLS URL for NDC code
+              const ndcUrl = `https://uts.nlm.nih.gov/uts/umls/concept/${rxnormCode.cui}`;
+
               ndcResults.push({
                 cui: rxnormCode.cui,
                 conceptName: rxnormCode.conceptName,
@@ -948,7 +1100,12 @@ export default function UMLSSearch() {
                 code: ndc.code,
                 vocabulary: 'NDC',
                 term: `${rxnormCode.term} [${ndc.code}]`,
-                codeUrl: null,
+                termType: rxnormCode.termType,
+                doseForm: rxnormCode.doseForm,
+                strength: rxnormCode.strength,
+                ingredientCount: rxnormCode.ingredientCount,
+                prescribable: rxnormCode.prescribable,
+                codeUrl: ndcUrl,
                 sourceRxcui: rxnormCode.code
               });
             });
@@ -1102,74 +1259,53 @@ export default function UMLSSearch() {
       {/* Search Form - Only show when not viewing atoms or hierarchy */}
       {!selectedConcept && !hierarchyData && (
         <div className="card space-y-4">
-          {/* Domain Selector */}
-          <div>
-            <label className="block text-sm font-semibold text-gray-900 mb-2">
-              Select Medical Domain:
-            </label>
-            <div className="grid grid-cols-5 gap-2">
-              {Object.entries(DOMAIN_CONFIG_UI).map(([key, config]) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => setSearchDomain(key as keyof typeof DOMAIN_VOCABULARIES_MAP)}
-                  className={`px-3 py-2 text-sm font-medium rounded-md transition-colors ${
-                    searchDomain === key
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                  }`}
-                >
-                  <span className="mr-1">{config.icon}</span>
-                  {config.label}
-                </button>
-              ))}
-            </div>
-            <p className="mt-2 text-xs text-gray-600">
-              <strong>Active vocabularies:</strong> {DOMAIN_VOCABULARIES_MAP[searchDomain].join(', ')}
-            </p>
-          </div>
-
           {/* Search Input */}
-          <form onSubmit={handleSearch} className="flex items-center gap-3">
-            <div className="relative flex-1">
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="UMLS Search (e.g., diabetes, acetaminophen)"
-                className="input pr-10 w-full"
-              />
-              <Search className="absolute right-3 top-2.5 h-5 w-5 text-gray-400" />
+          <form onSubmit={handleSearch} className="flex flex-col gap-3">
+            <div className="flex items-center gap-3">
+              <div className="relative flex-1">
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="UMLS Search (e.g., diabetes, acetaminophen)"
+                  className="input pr-10 w-full"
+                />
+                <Search className="absolute right-3 top-2.5 h-5 w-5 text-gray-400" />
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading || !searchTerm.trim()}
+                className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="inline h-4 w-4 mr-2 animate-spin" />
+                    Searching...
+                  </>
+                ) : (
+                  'Search'
+                )}
+              </button>
+
+              {searchTerm && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchTerm('');
+                    setResults([]);
+                    setRawResponse(null);
+                  }}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 whitespace-nowrap"
+                >
+                  Clear
+                </button>
+              )}
             </div>
 
-            <button
-              type="submit"
-              disabled={loading || !searchTerm.trim()}
-              className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="inline h-4 w-4 mr-2 animate-spin" />
-                  Searching...
-                </>
-              ) : (
-                'Search'
-              )}
-            </button>
-
-            {searchTerm && (
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchTerm('');
-                  setResults([]);
-                  setRawResponse(null);
-                }}
-                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 whitespace-nowrap"
-              >
-                Clear
-              </button>
-            )}
+            <p className="text-xs text-gray-600">
+              <strong>Searching across:</strong> {ALL_SEARCH_VOCABULARIES.join(', ')}
+            </p>
           </form>
         </div>
       )}
@@ -1201,7 +1337,7 @@ export default function UMLSSearch() {
             <table className="w-full border-collapse">
               <thead>
                 <tr className="border-b border-gray-300">
-                  <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">CUI</th>
+                  <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Concept Unique Identifier</th>
                   <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Concept Name</th>
                 </tr>
               </thead>
@@ -1230,7 +1366,12 @@ export default function UMLSSearch() {
       {selectedConcept && !hierarchyData && (
         <div id="concept-details" className="card">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold">Atom Details for CUI: {selectedConcept.concept.ui}</h3>
+            <div>
+              <h3 className="text-lg font-semibold">Atom Details for CUI: {selectedConcept.concept.ui}</h3>
+              <p className="text-sm text-gray-600 mt-1">
+                Select the atom closest to the starting point of your desired code set to review its hierarchy.
+              </p>
+            </div>
             <button
               onClick={handleBackToSearch}
               className="text-sm text-blue-600 hover:text-blue-800 font-medium"
@@ -1315,7 +1456,7 @@ export default function UMLSSearch() {
                                         onClick={() => supportsHierarchy && handleExploreHierarchy(atom)}
                                         className={`border-b border-gray-100 ${
                                           supportsHierarchy
-                                            ? 'hover:bg-green-50 transition-colors cursor-pointer'
+                                            ? 'hover:bg-green-100 transition-colors cursor-pointer'
                                             : 'opacity-50 cursor-not-allowed'
                                         }`}
                                       >
@@ -1380,72 +1521,19 @@ export default function UMLSSearch() {
           </div>
 
           <div className="space-y-4">
-            {/* Domain Selector */}
-            <div className="bg-blue-50 border border-blue-200 rounded-md p-3">
-              <label className="block text-sm font-semibold text-gray-900 mb-2">
-                Select Medical Domain for Code Set:
-              </label>
-              <select
-                value={selectedBuildDomain}
-                onChange={(e) => setSelectedBuildDomain(e.target.value as keyof typeof BUILD_DOMAIN_VOCABULARIES)}
-                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                {Object.entries(BUILD_DOMAIN_CONFIG).map(([key, config]) => (
-                  <option key={key} value={key}>
-                    {config.icon} {config.label} - {config.description}
-                  </option>
-                ))}
-              </select>
-              <p className="mt-2 text-xs text-gray-600">
-                This determines which vocabularies will be included when you build the code set.
-                Click on any code below to use it as a starting point.
-              </p>
-            </div>
-
-            {/* Selected Code (Anchor) - Clickable */}
+            {/* Ancestors - Collapsible (Default Collapsed) */}
             <div>
-              <h4 className="font-semibold text-gray-900 mb-2">
-                Selected Code (click to use as starting point)
-              </h4>
-              <div className="overflow-x-auto">
-                <table className="w-full border-collapse text-sm">
-                  <thead>
-                    <tr className="border-b border-gray-300">
-                      <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Code</th>
-                      <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Name</th>
-                      <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Vocabulary</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr
-                      onClick={() => handleBuildClick({
-                        ui: hierarchyData.atom.ui,
-                        code: hierarchyData.atom.actualCode || hierarchyData.atom.code,
-                        name: hierarchyData.atom.name,
-                        rootSource: hierarchyData.atom.rootSource
-                      })}
-                      className="border-b border-gray-100 bg-blue-50 hover:bg-blue-100 transition-colors cursor-pointer"
-                    >
-                      <td className="py-1.5 px-2 font-mono text-xs font-semibold">{hierarchyData.atom.actualCode || hierarchyData.atom.code}</td>
-                      <td className="py-1.5 px-2 text-sm font-semibold">{hierarchyData.atom.name}</td>
-                      <td className="py-1.5 px-2">
-                        <span className="inline-block bg-blue-600 text-white text-xs px-2 py-0.5 rounded font-semibold">
-                          {hierarchyData.atom.rootSource}
-                        </span>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
+              <button
+                onClick={() => setShowAncestors(!showAncestors)}
+                className="flex items-center gap-2 w-full text-left font-semibold text-gray-900 hover:text-gray-700 transition-colors"
+              >
+                {showAncestors ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                <span>Ancestors (Parents) - {hierarchyData.ancestors?.length || 0} found</span>
+                <span className="text-xs text-gray-500 font-normal ml-2">Click to expand/collapse</span>
+              </button>
 
-            {/* Ancestors */}
-            {hierarchyData.ancestors && hierarchyData.ancestors.length > 0 && (
-              <div>
-                <h4 className="font-semibold text-gray-900 mb-2">
-                  Ancestors (Parents) - {hierarchyData.ancestors.length} found
-                </h4>
-                <div className="overflow-x-auto">
+              {showAncestors && hierarchyData.ancestors && hierarchyData.ancestors.length > 0 && (
+                <div className="mt-2 overflow-x-auto">
                   <table className="w-full border-collapse text-sm">
                     <thead>
                       <tr className="border-b border-gray-300">
@@ -1484,22 +1572,70 @@ export default function UMLSSearch() {
                     </tbody>
                   </table>
                 </div>
-              </div>
-            )}
+              )}
 
-            {hierarchyData.ancestors && hierarchyData.ancestors.length === 0 && (
-              <div className="text-sm text-gray-600 italic">
-                No ancestors found (this may be a root concept)
-              </div>
-            )}
+              {showAncestors && hierarchyData.ancestors && hierarchyData.ancestors.length === 0 && (
+                <div className="mt-2 text-sm text-gray-600 italic">
+                  No ancestors found (this may be a root concept)
+                </div>
+              )}
+            </div>
 
-            {/* Descendants */}
-            {hierarchyData.descendants && hierarchyData.descendants.length > 0 && (
-              <div>
-                <h4 className="font-semibold text-gray-900 mb-2">
-                  Descendants (Children) - {hierarchyData.descendants.length} found
-                </h4>
-                <div className="overflow-x-auto">
+            {/* Anchor Code */}
+            <div>
+              <h4 className="font-semibold text-gray-900 mb-2">Anchor Code</h4>
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-300">
+                      <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Code</th>
+                      <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Name</th>
+                      <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Vocabulary</th>
+                      <th className="text-center py-1 px-2 font-semibold text-gray-700 text-sm">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="border-b border-gray-100 bg-blue-50">
+                      <td className="py-1.5 px-2 font-mono text-xs font-semibold">{hierarchyData.atom.actualCode || hierarchyData.atom.code}</td>
+                      <td className="py-1.5 px-2 text-sm font-semibold">{hierarchyData.atom.name}</td>
+                      <td className="py-1.5 px-2">
+                        <span className="inline-block bg-blue-600 text-white text-xs px-2 py-0.5 rounded font-semibold">
+                          {hierarchyData.atom.rootSource}
+                        </span>
+                      </td>
+                      <td className="py-1.5 px-2 text-center">
+                        <button
+                          onClick={() => handleBuildClick({
+                            ui: hierarchyData.atom.ui,
+                            code: hierarchyData.atom.actualCode || hierarchyData.atom.code,
+                            name: hierarchyData.atom.name,
+                            rootSource: hierarchyData.atom.rootSource
+                          })}
+                          className="bg-green-600 hover:bg-green-700 text-white text-xs font-bold px-4 py-2 rounded shadow-md hover:shadow-lg transition-all flex items-center gap-2"
+                        >
+                          <Play className="w-4 h-4" />
+                          Build Code Set
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Descendants - Collapsible (Default Collapsed) */}
+            <div>
+              <button
+                onClick={() => setShowDescendants(!showDescendants)}
+                className="flex items-center gap-2 w-full text-left font-semibold text-gray-900 hover:text-gray-700 transition-colors"
+              >
+                {showDescendants ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                <span>Descendants (Children) - {hierarchyData.descendants?.length || 0} found</span>
+                <span className="text-xs text-gray-500 font-normal ml-2">Click to expand/collapse</span>
+              </button>
+
+              {showDescendants && hierarchyData.descendants && hierarchyData.descendants.length > 0 && (
+                <div className="mt-2 overflow-x-auto">
                   <table className="w-full border-collapse text-sm">
                     <thead>
                       <tr className="border-b border-gray-300">
@@ -1538,14 +1674,14 @@ export default function UMLSSearch() {
                     </tbody>
                   </table>
                 </div>
-              </div>
-            )}
+              )}
 
-            {hierarchyData.descendants && hierarchyData.descendants.length === 0 && (
-              <div className="text-sm text-gray-600 italic">
-                No descendants found (this may be a leaf concept)
-              </div>
-            )}
+              {showDescendants && hierarchyData.descendants && hierarchyData.descendants.length === 0 && (
+                <div className="mt-2 text-sm text-gray-600 italic">
+                  No descendants found (this may be a leaf concept)
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -1556,7 +1692,11 @@ export default function UMLSSearch() {
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold">Build Code Set</h3>
             <button
-              onClick={() => setBuildData(null)}
+              onClick={() => {
+                setBuildData(null);
+                setBuildFilterText('');
+                setBuildFilterVocabularies([]);
+              }}
               className="text-sm text-blue-600 hover:text-blue-800 font-medium"
             >
               ← Back to Hierarchy
@@ -1566,10 +1706,22 @@ export default function UMLSSearch() {
           <div className="space-y-4">
             {/* Build Info */}
             <div className="bg-green-50 p-3 rounded-md border border-green-200 text-sm space-y-2">
-              <div className="flex flex-wrap gap-x-6 gap-y-1">
-                <p><strong>Root Code:</strong> <span className="font-mono">{buildData.rootNode.ui}</span></p>
-                <p><strong>Source Vocabulary:</strong> <span className="bg-purple-100 text-purple-800 px-2 py-0.5 rounded text-xs">{buildData.vocabulary}</span></p>
-                <p><strong>Root Term:</strong> {buildData.rootNode.name}</p>
+              {/* Header with Export Button */}
+              <div className="flex items-center justify-between mb-1">
+                <div className="flex flex-wrap gap-x-6 gap-y-1 flex-1">
+                  <p><strong>Root Code:</strong> <span className="font-mono">{buildData.rootNode.ui}</span></p>
+                  <p><strong>Source Vocabulary:</strong> <span className="bg-purple-100 text-purple-800 px-2 py-0.5 rounded text-xs">{buildData.vocabulary}</span></p>
+                  <p><strong>Root Term:</strong> {buildData.rootNode.name}</p>
+                </div>
+                {!loadingBuild && (
+                  <button
+                    onClick={exportToTxt}
+                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors whitespace-nowrap"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Export to .txt file
+                  </button>
+                )}
               </div>
               <div className="flex flex-wrap gap-x-6 gap-y-1">
                 <p><strong>Medical Domain:</strong> {BUILD_DOMAIN_CONFIG[buildData.buildDomain as keyof typeof BUILD_DOMAIN_CONFIG]?.icon} {BUILD_DOMAIN_CONFIG[buildData.buildDomain as keyof typeof BUILD_DOMAIN_CONFIG]?.label}</p>
@@ -1581,6 +1733,58 @@ export default function UMLSSearch() {
               <div>
                 <p className="text-xs"><strong>Included Vocabularies:</strong> {buildData.targetVocabularies?.join(', ')}</p>
               </div>
+
+              {/* Filters Section */}
+              {!loadingBuild && (
+                <div className="border-t border-green-300 pt-2 mt-2 space-y-1.5">
+                  {/* Quick Filters - All on one line */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="text-xs font-semibold text-gray-900 whitespace-nowrap">
+                      Quick Filters:
+                    </label>
+                    <label className="text-xs font-medium text-gray-700 whitespace-nowrap">
+                      Dynamic Filter
+                    </label>
+                    <div className="relative" style={{ width: '240px' }}>
+                      <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <input
+                        type="text"
+                        value={buildFilterText}
+                        onChange={(e) => setBuildFilterText(e.target.value)}
+                        placeholder="Search... (3+ chars)"
+                        maxLength={30}
+                        className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-300 bg-white rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                      />
+                    </div>
+                    {/* Vocabulary Filter Buttons on same line */}
+                    {getAvailableVocabularies().map((vocab: string) => (
+                      <button
+                        key={vocab}
+                        onClick={() => toggleVocabularyFilter(vocab)}
+                        className={`text-xs px-2 py-1 rounded transition-colors ${
+                          buildFilterVocabularies.includes(vocab)
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        {vocab}
+                      </button>
+                    ))}
+                    {buildFilterVocabularies.length > 0 && (
+                      <button
+                        onClick={() => setBuildFilterVocabularies([])}
+                        className="text-xs text-blue-600 hover:text-blue-800"
+                      >
+                        Clear vocabulary filter
+                      </button>
+                    )}
+                  </div>
+
+                  {buildFilterText.length > 0 && buildFilterText.length < 3 && (
+                    <p className="text-xs text-gray-500">Enter at least 3 characters to filter</p>
+                  )}
+                </div>
+              )}
             </div>
 
             {loadingBuild && (
@@ -1609,41 +1813,92 @@ export default function UMLSSearch() {
             )}
 
             {/* All Codes Table */}
-            {!loadingBuild && buildData.allCodes && buildData.allCodes.length > 0 && (
-              <div>
-                <h4 className="font-semibold text-gray-900 mb-2">
-                  All Codes Across Vocabularies ({buildData.allCodes.length} total)
-                </h4>
-                <div className="overflow-x-auto">
-                  <table className="w-full border-collapse text-sm">
-                    <thead>
-                      <tr className="border-b border-gray-300">
-                        <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">CUI</th>
-                        <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">Code</th>
-                        <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">Vocabulary</th>
-                        <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">Term</th>
-                        <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">Concept</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {buildData.allCodes.map((code: any, idx: number) => (
-                        <tr key={idx} className="border-b border-gray-100">
-                          <td className="py-1.5 px-2 font-mono text-xs text-gray-600">{code.cui}</td>
-                          <td className="py-1.5 px-2 font-mono text-xs">{code.code}</td>
-                          <td className="py-1.5 px-2">
-                            <span className="inline-block bg-blue-100 text-blue-800 text-xs px-2 py-0.5 rounded">
-                              {code.vocabulary}
-                            </span>
-                          </td>
-                          <td className="py-1.5 px-2 text-xs">{code.term}</td>
-                          <td className="py-1.5 px-2 text-xs text-gray-600">{code.conceptName}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+            {!loadingBuild && buildData.allCodes && buildData.allCodes.length > 0 && (() => {
+              const filteredCodes = getFilteredBuildCodes();
+              // Check if this build contains any drug codes (RxNorm or NDC)
+              const hasDrugCodes = buildData.allCodes.some((code: any) =>
+                code.vocabulary === 'RXNORM' || code.vocabulary === 'NDC'
+              );
+
+              return (
+                <div>
+                  <h4 className="font-semibold text-gray-900 mb-2">
+                    All Codes Across Vocabularies ({filteredCodes.length} of {buildData.allCodes.length} total)
+                  </h4>
+                  {filteredCodes.length === 0 ? (
+                    <div className="text-center py-8 text-gray-500">
+                      <p>No codes match the current filters.</p>
+                      <button
+                        onClick={() => {
+                          setBuildFilterText('');
+                          setBuildFilterVocabularies([]);
+                        }}
+                        className="text-sm text-blue-600 hover:text-blue-800 mt-2"
+                      >
+                        Clear all filters
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse text-sm">
+                        <thead>
+                          <tr className="border-b border-gray-300">
+                            <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">CUI</th>
+                            <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">Code</th>
+                            <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">Vocabulary</th>
+                            <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">Term</th>
+                            {hasDrugCodes && (
+                              <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">Form</th>
+                            )}
+                            <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">URL</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredCodes.map((code: any, idx: number) => (
+                          <tr key={idx} className="border-b border-gray-100">
+                            <td className="py-1.5 px-2 font-mono text-xs text-gray-600">{code.cui}</td>
+                            <td className="py-1.5 px-2 font-mono text-xs">{code.code}</td>
+                            <td className="py-1.5 px-2">
+                              <span className="inline-block bg-blue-100 text-blue-800 text-xs px-2 py-0.5 rounded">
+                                {code.vocabulary}
+                              </span>
+                            </td>
+                            <td className="py-1.5 px-2 text-xs">{code.term}</td>
+                            {hasDrugCodes && (
+                              <td className="py-1.5 px-2 text-xs">
+                                {code.doseForm ? (
+                                  <span className="inline-block bg-purple-100 text-purple-800 text-xs px-2 py-0.5 rounded">
+                                    {code.doseForm}
+                                  </span>
+                                ) : (
+                                  <span className="text-gray-400 italic">-</span>
+                                )}
+                              </td>
+                            )}
+                            <td className="py-1.5 px-2 text-xs">
+                              {code.codeUrl ? (
+                                <a
+                                  href={code.codeUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-blue-600 hover:text-blue-800 hover:underline"
+                                  title="Open in UMLS Browser"
+                                >
+                                  🔗 View
+                                </a>
+                              ) : (
+                                <span className="text-gray-400 italic">-</span>
+                              )}
+                            </td>
+                          </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
         </div>
       )}
@@ -1705,6 +1960,65 @@ export default function UMLSSearch() {
                 Continue Anyway
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Build Loading Modal */}
+      {loadingBuild && !buildData && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 p-6">
+            <div className="flex items-center justify-center mb-4">
+              <Loader2 className="h-12 w-12 text-blue-600 animate-spin" />
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-3 text-center">
+              Building Code Set
+            </h3>
+            <div className="space-y-3 text-sm text-gray-700">
+              <p className="text-center">
+                Calling UMLS API to build code set. This could take up to a few minutes with large code sets.
+              </p>
+              {buildProgress && (
+                <div className="bg-blue-50 border border-blue-200 rounded p-3">
+                  <p className="font-semibold text-blue-900 text-xs mb-2">
+                    {buildProgress.phase}
+                  </p>
+                  {buildProgress.total > 0 && (
+                    <div className="space-y-1">
+                      <div className="w-full bg-blue-200 rounded-full h-2">
+                        <div
+                          className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${(buildProgress.current / buildProgress.total) * 100}%` }}
+                        ></div>
+                      </div>
+                      <p className="text-xs text-blue-800 text-center">
+                        {buildProgress.current} / {buildProgress.total}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+              <p className="text-xs text-gray-500 text-center italic">
+                Please wait while we process your request...
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Building Hierarchy Loading Modal */}
+      {loadingHierarchy && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 p-6">
+            <div className="flex items-center justify-center mb-4">
+              <Loader2 className="h-12 w-12 text-blue-600 animate-spin" />
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900 text-center">
+              Building Hierarchy
+            </h3>
+            <p className="text-sm text-gray-600 text-center mt-2">
+              Fetching ancestors and descendants...
+            </p>
           </div>
         </div>
       )}
