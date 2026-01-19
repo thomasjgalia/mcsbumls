@@ -49,6 +49,61 @@ const BUILD_DOMAIN_VOCABULARIES = {
   procedure: ['CPT', 'HCPCS', 'SNOMEDCT_US', 'ICD9PCS', 'LNC', 'ICD10PCS']
 };
 
+// TTY (Term Type) label mappings
+const TTY_LABELS: { [key: string]: string } = {
+  // RxNorm
+  'IN': 'Ingredient',
+  'PIN': 'Precise Ingredient',
+  'SCD': 'Clinical Drug',
+  'SBD': 'Branded Drug',
+  'GPCK': 'Generic Pack',
+  'BPCK': 'Branded Pack',
+  'SCDC': 'Clinical Drug Component',
+  'SBDC': 'Branded Drug Component',
+  'SCDF': 'Clinical Drug Form',
+  'SBDF': 'Branded Drug Form',
+  'SCDG': 'Clinical Drug Group',
+  'SBDG': 'Branded Drug Group',
+  'MIN': 'Multiple Ingredients',
+  'BN': 'Brand Name',
+
+  // SNOMED CT
+  'PT': 'Preferred Term',
+  'FN': 'Fully Specified Name',
+  'SY': 'Synonym',
+  'MTH_PT': 'Metathesaurus Preferred',
+  'OAF': 'Obsolete Fully Specified',
+  'OAP': 'Obsolete Preferred',
+
+  // ICD-10-CM / ICD-9-CM
+  'HT': 'Hierarchical Term',
+  'HTN': 'Hierarchical Narrower',
+  'AB': 'Abbreviation',
+  'XM': 'Cross-mapping',
+
+  // CPT / HCPCS
+  'ET': 'Entry Term',
+
+  // LOINC
+  'LC': 'LOINC Code',
+  'LO': 'LOINC Official',
+  'LS': 'LOINC Short Name',
+  'LN': 'LOINC Long Name',
+  'LP': 'LOINC Part',
+  'MTH_LO': 'Metathesaurus LOINC',
+
+  // MeSH
+  'MH': 'Main Heading',
+  'NM': 'Name of Substance',
+  'PEP': 'Preferred Entry Point'
+};
+
+// Function to get readable label for TTY code
+const getTTYLabel = (tty: string | undefined): string => {
+  if (!tty) return '';
+  return TTY_LABELS[tty] || tty;
+};
+
 // Display labels for build domains
 const BUILD_DOMAIN_CONFIG = {
   condition: { label: 'Condition', icon: '🏥' },
@@ -131,6 +186,7 @@ export default function UMLSSearch() {
   const [showDescendants, setShowDescendants] = useState(false);
   const [buildFilterText, setBuildFilterText] = useState('');
   const [buildFilterVocabularies, setBuildFilterVocabularies] = useState<string[]>([]);
+  const [buildFilterDoseForms, setBuildFilterDoseForms] = useState<string[]>([]);
 
   // Determine current step based on state
   const getCurrentStep = () => {
@@ -167,6 +223,13 @@ export default function UMLSSearch() {
       );
     }
 
+    // Apply dose form filter
+    if (buildFilterDoseForms.length > 0) {
+      filtered = filtered.filter((code: any) =>
+        code.doseForm && buildFilterDoseForms.includes(code.doseForm)
+      );
+    }
+
     // Sort by Vocabulary first, then by Code
     return filtered.sort((a, b) => {
       const vocabCompare = (a.vocabulary || '').localeCompare(b.vocabulary || '');
@@ -188,6 +251,26 @@ export default function UMLSSearch() {
       prev.includes(vocab)
         ? prev.filter(v => v !== vocab)
         : [...prev, vocab]
+    );
+  };
+
+  // Get unique dose forms from build data
+  const getAvailableDoseForms = (): string[] => {
+    if (!buildData?.allCodes) return [];
+    const forms = new Set(
+      buildData.allCodes
+        .map((code: any) => code.doseForm)
+        .filter((form: any) => form) // Only include codes that have a dose form
+    );
+    return Array.from(forms).sort() as string[];
+  };
+
+  // Toggle dose form filter
+  const toggleDoseFormFilter = (form: string) => {
+    setBuildFilterDoseForms(prev =>
+      prev.includes(form)
+        ? prev.filter(f => f !== form)
+        : [...prev, form]
     );
   };
 
@@ -1540,6 +1623,7 @@ export default function UMLSSearch() {
                         <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Code</th>
                         <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Name</th>
                         <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Vocabulary</th>
+                        <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Type</th>
                         <th className="text-center py-1 px-2 font-semibold text-gray-700 text-sm">Actions</th>
                       </tr>
                     </thead>
@@ -1556,6 +1640,13 @@ export default function UMLSSearch() {
                             <span className="inline-block bg-gray-100 text-gray-800 text-xs px-2 py-0.5 rounded">
                               {ancestor.rootSource}
                             </span>
+                          </td>
+                          <td className="py-1.5 px-2 text-xs">
+                            {ancestor.termType && (
+                              <span className="inline-block bg-purple-100 text-purple-800 text-xs px-2 py-0.5 rounded" title={ancestor.termType}>
+                                {getTTYLabel(ancestor.termType)}
+                              </span>
+                            )}
                           </td>
                           <td className="py-1.5 px-2 text-center">
                             <button
@@ -1591,6 +1682,7 @@ export default function UMLSSearch() {
                       <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Code</th>
                       <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Name</th>
                       <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Vocabulary</th>
+                      <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Type</th>
                       <th className="text-center py-1 px-2 font-semibold text-gray-700 text-sm">Action</th>
                     </tr>
                   </thead>
@@ -1602,6 +1694,13 @@ export default function UMLSSearch() {
                         <span className="inline-block bg-blue-600 text-white text-xs px-2 py-0.5 rounded font-semibold">
                           {hierarchyData.atom.rootSource}
                         </span>
+                      </td>
+                      <td className="py-1.5 px-2 text-xs">
+                        {hierarchyData.atom.termType && (
+                          <span className="inline-block bg-purple-100 text-purple-800 text-xs px-2 py-0.5 rounded font-semibold" title={hierarchyData.atom.termType}>
+                            {getTTYLabel(hierarchyData.atom.termType)}
+                          </span>
+                        )}
                       </td>
                       <td className="py-1.5 px-2 text-center">
                         <button
@@ -1642,6 +1741,7 @@ export default function UMLSSearch() {
                         <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Code</th>
                         <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Name</th>
                         <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Vocabulary</th>
+                        <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Type</th>
                         <th className="text-center py-1 px-2 font-semibold text-gray-700 text-sm">Actions</th>
                       </tr>
                     </thead>
@@ -1658,6 +1758,13 @@ export default function UMLSSearch() {
                             <span className="inline-block bg-green-100 text-green-800 text-xs px-2 py-0.5 rounded">
                               {descendant.rootSource}
                             </span>
+                          </td>
+                          <td className="py-1.5 px-2 text-xs">
+                            {descendant.termType && (
+                              <span className="inline-block bg-purple-100 text-purple-800 text-xs px-2 py-0.5 rounded" title={descendant.termType}>
+                                {getTTYLabel(descendant.termType)}
+                              </span>
+                            )}
                           </td>
                           <td className="py-1.5 px-2 text-center">
                             <button
@@ -1696,6 +1803,7 @@ export default function UMLSSearch() {
                 setBuildData(null);
                 setBuildFilterText('');
                 setBuildFilterVocabularies([]);
+                setBuildFilterDoseForms([]);
               }}
               className="text-sm text-blue-600 hover:text-blue-800 font-medium"
             >
@@ -1779,6 +1887,39 @@ export default function UMLSSearch() {
                       </button>
                     )}
                   </div>
+
+                  {/* Dose Form Filter - Only show if there are drug codes */}
+                  {(() => {
+                    const availableForms = getAvailableDoseForms();
+                    return availableForms.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <label className="text-xs font-medium text-gray-700 whitespace-nowrap">
+                          Dose Form:
+                        </label>
+                        {availableForms.map((form: string) => (
+                          <button
+                            key={form}
+                            onClick={() => toggleDoseFormFilter(form)}
+                            className={`text-xs px-2 py-1 rounded transition-colors ${
+                              buildFilterDoseForms.includes(form)
+                                ? 'bg-purple-600 text-white'
+                                : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                            }`}
+                          >
+                            {form}
+                          </button>
+                        ))}
+                        {buildFilterDoseForms.length > 0 && (
+                          <button
+                            onClick={() => setBuildFilterDoseForms([])}
+                            className="text-xs text-blue-600 hover:text-blue-800"
+                          >
+                            Clear dose form filter
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {buildFilterText.length > 0 && buildFilterText.length < 3 && (
                     <p className="text-xs text-gray-500">Enter at least 3 characters to filter</p>
@@ -1866,12 +2007,10 @@ export default function UMLSSearch() {
                             <td className="py-1.5 px-2 text-xs">{code.term}</td>
                             {hasDrugCodes && (
                               <td className="py-1.5 px-2 text-xs">
-                                {code.doseForm ? (
+                                {code.doseForm && (
                                   <span className="inline-block bg-purple-100 text-purple-800 text-xs px-2 py-0.5 rounded">
                                     {code.doseForm}
                                   </span>
-                                ) : (
-                                  <span className="text-gray-400 italic">-</span>
                                 )}
                               </td>
                             )}
