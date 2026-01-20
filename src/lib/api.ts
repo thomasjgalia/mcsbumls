@@ -14,6 +14,15 @@ import type {
 
 const API_BASE = import.meta.env.PROD ? '' : 'http://localhost:5173';
 
+// Helper: Extract code from URL (if code field is a URL)
+function extractCodeFromUrl(codeOrUrl: string): string {
+  if (codeOrUrl && codeOrUrl.startsWith('http')) {
+    const urlParts = codeOrUrl.split('/');
+    return urlParts[urlParts.length - 1];
+  }
+  return codeOrUrl;
+}
+
 // UMLS Search - Multi-page fetch with sorting
 export async function searchUMLS(params: SearchUMLSRequest): Promise<SearchUMLSResponse> {
   const apiKey = import.meta.env.VITE_UMLS_API_KEY;
@@ -324,6 +333,70 @@ async function getRxNormDescendants(rxcui: string): Promise<any[]> {
   }
 }
 
+// Get RxNorm ancestors using UMLS source-level relations
+export async function getRxNormAncestors(rxcui: string): Promise<any[]> {
+  const apiKey = import.meta.env.VITE_UMLS_API_KEY;
+
+  if (!apiKey || apiKey === 'your_umls_api_key_here') {
+    throw new Error('UMLS API key not configured.');
+  }
+
+  try {
+    console.log(`[RXNORM ANCESTORS] Fetching source-level relations for RXCUI ${rxcui}`);
+
+    // Try to get source atom relations (not /ancestors which doesn't work for RxNorm)
+    const url = `https://uts-ws.nlm.nih.gov/rest/content/2025AB/source/RXNORM/${rxcui}/relations?apiKey=${apiKey}`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      console.warn(`[RXNORM ANCESTORS] Relations API returned ${response.status} for ${rxcui}`);
+      return [];
+    }
+
+    const data = await response.json();
+    const rawRelations = data.result || [];
+
+    // Debug: Log raw structure and relationship types
+    console.log(`[RXNORM ANCESTORS] Raw relations (${rawRelations.length} total):`, rawRelations);
+    if (rawRelations.length > 0) {
+      const relationTypes = new Set(rawRelations.map((r: any) => r.relationLabel));
+      const additionalRelationTypes = new Set(rawRelations.map((r: any) => r.additionalRelationLabel));
+      console.log(`[RXNORM ANCESTORS] Unique relationLabel values:`, Array.from(relationTypes));
+      console.log(`[RXNORM ANCESTORS] Unique additionalRelationLabel values:`, Array.from(additionalRelationTypes));
+      console.log(`[RXNORM ANCESTORS] Sample relation:`, rawRelations[0]);
+    }
+
+    // Filter for ancestor-like relationships
+    // Look for broader terms: isa, ingredient_of, tradename_of, etc.
+    const ancestorRelations = rawRelations.filter((rel: any) => {
+      const relLabel = rel.relationLabel || '';
+      const addLabel = rel.additionalRelationLabel || '';
+
+      // RB = broader, PAR = parent, or specific RxNorm relationships pointing "up"
+      return relLabel === 'RB' || relLabel === 'PAR' ||
+             addLabel === 'isa' || addLabel === 'ingredient_of' ||
+             addLabel === 'tradename_of' || addLabel === 'has_tradename';
+    });
+
+    console.log(`[RXNORM ANCESTORS] Filtered ${ancestorRelations.length} ancestor-like relations`);
+
+    // Process ancestors
+    const ancestors = ancestorRelations.map((rel: any) => ({
+      ui: rel.relatedId || rel.relatedIdName,
+      code: extractCodeFromUrl(rel.relatedId || ''),
+      name: rel.relatedIdName,
+      rootSource: rel.rootSource || 'RXNORM',
+      relationLabel: rel.relationLabel,
+      additionalRelationLabel: rel.additionalRelationLabel
+    }));
+
+    return ancestors;
+  } catch (error) {
+    console.error(`[RXNORM ANCESTORS] Error fetching ancestors:`, error);
+    return [];
+  }
+}
+
 // Get NDC codes from UMLS attributes for an RxNorm code
 async function getRxNormAttributesNDC(rxcui: string, cui?: string): Promise<any[]> {
   const apiKey = import.meta.env.VITE_UMLS_API_KEY;
@@ -529,6 +602,135 @@ export async function getRxNormToNDC(rxcui: string, cui?: string): Promise<any[]
     return allNdcCodes;
   } catch (error) {
     console.error(`[RXNORM→NDC] Error fetching NDC codes:`, error);
+    return [];
+  }
+}
+
+// Get CUI-level ancestors using UMLS concept hierarchy
+// For RxNorm: filters for pharmaceutical/therapeutic class hierarchies
+export async function getCUIAncestors(cui: string): Promise<any[]> {
+  const apiKey = import.meta.env.VITE_UMLS_API_KEY;
+
+  if (!apiKey || apiKey === 'your_umls_api_key_here') {
+    throw new Error('UMLS API key not configured.');
+  }
+
+  try {
+    console.log(`[CUI ANCESTORS] Fetching concept ancestors for CUI ${cui}`);
+
+    // Fetch ALL relations for this CUI (no filter yet)
+    const response = await fetch(
+      `https://uts-ws.nlm.nih.gov/rest/content/2025AB/CUI/${cui}/relations?apiKey=${apiKey}&pageSize=1000`
+    );
+
+    if (!response.ok) {
+      console.warn(`[CUI ANCESTORS] API returned ${response.status} for CUI ${cui}`);
+      return [];
+    }
+
+    const data = await response.json();
+    const relations = data.result || [];
+
+    console.log(`[CUI ANCESTORS] Found ${relations.length} total relations`);
+
+    // Filter for RxNorm hierarchical parents using specific relation patterns
+    const hierarchicalParents = relations.filter((rel: any) => {
+      const relLabel = rel.relationLabel || '';
+      const addLabel = rel.additionalRelationLabel || '';
+      const rootSource = rel.rootSource || '';
+
+      // Pattern 1: SNOMED chemical class (e.g., "Carbamate ester")
+      const isSnomedIsa = relLabel === 'CHD' && addLabel === 'isa' && rootSource === 'SNOMEDCT_US';
+
+      // Pattern 2: MED-RT mechanism of action (e.g., "HIV Protease Inhibitors")
+      const isMedRtMechanism = relLabel === 'RO' && addLabel === 'has_mechanism_of_action' && rootSource === 'MED-RT';
+
+      // Pattern 3: MED-RT hierarchical parent (e.g., "R [Preparations]")
+      const isMedRtParent = relLabel === 'CHD' && addLabel === 'has_parent' && rootSource === 'MED-RT';
+
+      return isSnomedIsa || isMedRtMechanism || isMedRtParent;
+    });
+
+    console.log(`[CUI ANCESTORS] Filtered ${hierarchicalParents.length} hierarchical parent relations`);
+    console.log(`[CUI ANCESTORS] Relation patterns found:`, {
+      snomedIsa: hierarchicalParents.filter(r => r.additionalRelationLabel === 'isa').length,
+      medRtMechanism: hierarchicalParents.filter(r => r.additionalRelationLabel === 'has_mechanism_of_action').length,
+      medRtParent: hierarchicalParents.filter(r => r.additionalRelationLabel === 'has_parent').length
+    });
+
+    // For each hierarchical parent, fetch the atom cluster's atoms to extract parent CUI
+    const ancestors: any[] = [];
+    const seenCUIs = new Set<string>();
+
+    for (const rel of hierarchicalParents) {
+      const atomClusterUrl = rel.relatedId;
+      if (!atomClusterUrl || !atomClusterUrl.startsWith('http')) {
+        console.warn(`[CUI ANCESTORS] Skipping - no valid atom URL:`, rel);
+        continue;
+      }
+
+      try {
+        console.log(`[CUI ANCESTORS] Fetching atoms from: ${atomClusterUrl}/atoms`);
+
+        // Fetch the atoms list from the SourceAtomCluster
+        const atomsResponse = await fetch(`${atomClusterUrl}/atoms?apiKey=${apiKey}`);
+
+        if (!atomsResponse.ok) {
+          console.warn(`[CUI ANCESTORS] Failed to fetch atoms (${atomsResponse.status}): ${atomClusterUrl}/atoms`);
+          continue;
+        }
+
+        const atomsData = await atomsResponse.json();
+        const atoms = atomsData.result || [];
+
+        console.log(`[CUI ANCESTORS] Found ${atoms.length} atoms in cluster`);
+
+        if (atoms.length === 0) continue;
+
+        // Get the first atom's concept URL and extract the CUI
+        const firstAtom = atoms[0];
+        const conceptUrl = firstAtom?.concept;
+
+        if (!conceptUrl) {
+          console.warn(`[CUI ANCESTORS] No concept URL in atom:`, firstAtom);
+          continue;
+        }
+
+        // Extract CUI from concept URL (last part after final /)
+        const cuiMatch = conceptUrl.match(/\/CUI\/([^/]+)$/);
+        const parentCUI = cuiMatch ? cuiMatch[1] : null;
+
+        console.log(`[CUI ANCESTORS] Extracted parent CUI: ${parentCUI} from concept URL: ${conceptUrl}`);
+
+        // Only include if we have a valid parent CUI and haven't seen it before
+        if (parentCUI && /^C\d{7,8}$/.test(parentCUI) && parentCUI !== cui && !seenCUIs.has(parentCUI)) {
+          seenCUIs.add(parentCUI);
+
+          ancestors.push({
+            ui: parentCUI,
+            code: parentCUI,
+            name: rel.relatedIdName || firstAtom.name || 'Unknown',
+            rootSource: rel.rootSource,
+            relationLabel: rel.relationLabel,
+            additionalRelationLabel: rel.additionalRelationLabel,
+            hierarchyType: rel.additionalRelationLabel === 'isa' ? 'Chemical Class' :
+                          rel.additionalRelationLabel === 'has_mechanism_of_action' ? 'Therapeutic Class' :
+                          'Pharmaceutical Category'
+          });
+
+          console.log(`[CUI ANCESTORS] ✓ Found parent: ${parentCUI} - ${rel.relatedIdName} (${rel.additionalRelationLabel})`);
+        } else {
+          console.warn(`[CUI ANCESTORS] Skipping parent CUI ${parentCUI} - invalid or duplicate (cui=${cui}, seen=${seenCUIs.has(parentCUI)})`);
+        }
+      } catch (err) {
+        console.error(`[CUI ANCESTORS] Error fetching atom details for ${atomClusterUrl}:`, err);
+      }
+    }
+
+    console.log(`[CUI ANCESTORS] Final result: ${ancestors.length} unique parent CUIs`);
+    return ancestors;
+  } catch (error) {
+    console.error(`[CUI ANCESTORS] Error fetching CUI ancestors:`, error);
     return [];
   }
 }

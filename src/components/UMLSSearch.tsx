@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Search, Loader2, GitBranch, CheckCircle2, ChevronDown, ChevronRight, Play, Download } from 'lucide-react';
-import { searchUMLS, getConceptDetails, getAncestors, getDescendants, getRxNormToNDC, getRxNormAttributes } from '../lib/api';
+import { searchUMLS, getConceptDetails, getAncestors, getDescendants, getRxNormToNDC, getRxNormAttributes, getCUIAncestors } from '../lib/api';
 import type { UMLSSearchResult } from '../lib/types';
 
 // Vocabularies that support hierarchy navigation
@@ -507,6 +507,7 @@ export default function UMLSSearch() {
     try {
       const code = atom.actualCode || atom.code;
       const vocabulary = atom.rootSource;
+      const cui = selectedConcept?.concept?.ui;
 
       // Auto-detect appropriate build domain based on concept's semantic types
       if (selectedConcept?.concept?.semanticTypes) {
@@ -514,17 +515,36 @@ export default function UMLSSearch() {
         setSelectedBuildDomain(primaryBuildDomain);
       }
 
-      // Fetch ancestors and descendants in parallel
-      const [ancestors, descendants] = await Promise.all([
-        getAncestors(vocabulary, code),
-        getDescendants(vocabulary, code)
-      ]);
+      // RxNorm: Use CUI ancestors + RxNav descendants
+      if (vocabulary === 'RXNORM' && cui) {
+        console.log(`[RXNORM HIERARCHY] Using CUI ${cui} ancestors + RxNav descendants for RXCUI ${code}`);
 
-      setHierarchyData({
-        atom,
-        ancestors: ancestors.reverse(),  // Reverse to show broad → specific
-        descendants
-      });
+        // Fetch CUI-level ancestors (concept hierarchy) and RxNav descendants (related drugs)
+        const [ancestors, descendants] = await Promise.all([
+          getCUIAncestors(cui),             // CUI concept hierarchy
+          getDescendants(vocabulary, code)  // RxNav API for related drugs
+        ]);
+
+        console.log(`[RXNORM HIERARCHY] Found ${ancestors.length} CUI ancestors, ${descendants.length} RxNav descendants`);
+
+        setHierarchyData({
+          atom,
+          ancestors: ancestors.reverse(),
+          descendants
+        });
+      } else {
+        // Non-RxNorm: Use existing source code hierarchy approach
+        const [ancestors, descendants] = await Promise.all([
+          getAncestors(vocabulary, code),
+          getDescendants(vocabulary, code)
+        ]);
+
+        setHierarchyData({
+          atom,
+          ancestors: ancestors.reverse(),  // Reverse to show broad → specific
+          descendants
+        });
+      }
     } catch (err) {
       console.error('Failed to fetch hierarchy:', err);
       setError('Failed to load hierarchy');
