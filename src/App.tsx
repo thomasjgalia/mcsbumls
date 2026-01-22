@@ -65,6 +65,24 @@ function App() {
           </div>
         )}
       </main>
+
+      {/* Legal Notice */}
+      <div className="bg-gray-50 border-t border-gray-200">
+        <div className="max-w-7xl mx-auto px-4 py-6">
+          <p className="text-xs text-gray-600 text-center leading-relaxed">
+            Some material in the UMLS Metathesaurus is from copyrighted sources of the respective copyright holders. Users of the UMLS Metathesaurus are solely responsible for compliance with any copyright, patent or trademark restrictions and are referred to the copyright, patent or trademark notices appearing in the original sources, all of which are hereby incorporated by reference.
+          </p>
+        </div>
+      </div>
+
+      {/* Footer */}
+      <footer className="bg-white border-t border-gray-200">
+        <div className="max-w-7xl mx-auto px-4 py-4">
+          <p className="text-center text-sm text-gray-600">
+            Medical Code Set Builder | Powered by The UMLS Metathesaurus
+          </p>
+        </div>
+      </footer>
     </div>
   );
 }
