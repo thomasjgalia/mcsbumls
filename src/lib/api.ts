@@ -103,6 +103,64 @@ export async function searchUMLS(params: SearchUMLSRequest): Promise<SearchUMLSR
   };
 }
 
+// Fetch concept details for multiple CUIs in batches
+export async function enrichSearchResultsWithConceptDetails(results: any[]): Promise<any[]> {
+  const apiKey = import.meta.env.VITE_UMLS_API_KEY;
+
+  if (!apiKey || apiKey === 'your_umls_api_key_here') {
+    throw new Error('UMLS API key not configured.');
+  }
+
+  const BATCH_SIZE = 20; // Process 20 CUIs at a time
+  const enrichedResults = [...results];
+
+  // Process in batches to avoid overwhelming the API
+  for (let i = 0; i < results.length; i += BATCH_SIZE) {
+    const batch = results.slice(i, i + BATCH_SIZE);
+
+    const batchPromises = batch.map(async (result) => {
+      try {
+        const response = await fetch(
+          `https://uts-ws.nlm.nih.gov/rest/content/2025AB/CUI/${result.ui}?apiKey=${apiKey}`
+        );
+
+        if (!response.ok) {
+          console.warn(`Failed to fetch details for CUI ${result.ui}`);
+          return null;
+        }
+
+        const data = await response.json();
+        return {
+          cui: result.ui,
+          semanticTypes: data.result?.semanticTypes || [],
+          atomCount: data.result?.atomCount || 0,
+          status: data.result?.status || 'Unknown',
+        };
+      } catch (error) {
+        console.warn(`Error fetching details for CUI ${result.ui}:`, error);
+        return null;
+      }
+    });
+
+    const batchResults = await Promise.all(batchPromises);
+
+    // Merge the enriched data back into the results
+    batchResults.forEach((details, batchIndex) => {
+      if (details) {
+        const resultIndex = i + batchIndex;
+        enrichedResults[resultIndex] = {
+          ...enrichedResults[resultIndex],
+          semanticTypes: details.semanticTypes,
+          atomCount: details.atomCount,
+          status: details.status,
+        };
+      }
+    });
+  }
+
+  return enrichedResults;
+}
+
 // Get detailed concept information including atoms (source codes)
 export async function getConceptDetails(cui: string, vocabularies?: string[]): Promise<any> {
   const apiKey = import.meta.env.VITE_UMLS_API_KEY;

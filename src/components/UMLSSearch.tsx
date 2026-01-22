@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Search, Loader2, GitBranch, CheckCircle2, ChevronDown, ChevronRight, Play, Download } from 'lucide-react';
-import { searchUMLS, getConceptDetails, getAncestors, getDescendants, getRxNormToNDC, getRxNormAttributes, getCUIAncestors } from '../lib/api';
+import { searchUMLS, enrichSearchResultsWithConceptDetails, getConceptDetails, getAncestors, getDescendants, getRxNormToNDC, getRxNormAttributes, getCUIAncestors } from '../lib/api';
 import type { UMLSSearchResult } from '../lib/types';
 
 // Vocabularies that support hierarchy navigation
@@ -177,6 +177,11 @@ export default function UMLSSearch() {
   const [loadingBuild, setLoadingBuild] = useState(false);
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(new Set());
   const [sortBy, setSortBy] = useState<'relevance' | 'alphabetical'>('relevance');
+  const [vocabularyFilter, setVocabularyFilter] = useState<string>('all');
+  const [semanticTypeFilter, setSemanticTypeFilter] = useState<string>('all');
+  const [textSearch, setTextSearch] = useState<string>('');
+  const [sortColumn, setSortColumn] = useState<string>(''); // Column to sort by
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
   const [selectedBuildDomain, setSelectedBuildDomain] = useState<keyof typeof BUILD_DOMAIN_VOCABULARIES>('condition');
   const [buildProgress, setBuildProgress] = useState<{current: number, total: number, phase: string} | null>(null);
   const [showWarningModal, setShowWarningModal] = useState(false);
@@ -187,6 +192,72 @@ export default function UMLSSearch() {
   const [buildFilterText, setBuildFilterText] = useState('');
   const [buildFilterVocabularies, setBuildFilterVocabularies] = useState<string[]>([]);
   const [buildFilterDoseForms, setBuildFilterDoseForms] = useState<string[]>([]);
+
+  // Get unique semantic types for filter dropdown
+  const uniqueSemanticTypes = useMemo(() => {
+    const types = new Set<string>();
+    results.forEach(result => {
+      result.semanticTypes?.forEach(st => types.add(st.name));
+    });
+    return Array.from(types).sort();
+  }, [results]);
+
+  // Filter and sort results
+  const filteredResults = useMemo(() => {
+    let filtered = results;
+
+    // Apply vocabulary filter
+    if (vocabularyFilter !== 'all') {
+      filtered = filtered.filter(r => r.rootSource === vocabularyFilter);
+    }
+
+    // Apply semantic type filter
+    if (semanticTypeFilter !== 'all') {
+      filtered = filtered.filter(r =>
+        r.semanticTypes?.some(st => st.name === semanticTypeFilter)
+      );
+    }
+
+    // Apply text search filter (search in CUI and name)
+    if (textSearch.trim()) {
+      const searchLower = textSearch.toLowerCase();
+      filtered = filtered.filter(r =>
+        r.ui.toLowerCase().includes(searchLower) ||
+        r.name.toLowerCase().includes(searchLower)
+      );
+    }
+
+    // Apply column sorting
+    if (sortColumn) {
+      filtered = [...filtered].sort((a, b) => {
+        let aVal: any = a[sortColumn as keyof typeof a];
+        let bVal: any = b[sortColumn as keyof typeof b];
+
+        // Handle undefined values
+        if (aVal === undefined) aVal = '';
+        if (bVal === undefined) bVal = '';
+
+        // Handle semantic types (array)
+        if (sortColumn === 'semanticTypes') {
+          aVal = a.semanticTypes?.map(st => st.name).join(', ') || '';
+          bVal = b.semanticTypes?.map(st => st.name).join(', ') || '';
+        }
+
+        // Handle atom count (numeric)
+        if (sortColumn === 'atomCount') {
+          aVal = a.atomCount || 0;
+          bVal = b.atomCount || 0;
+          return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
+        }
+
+        // String comparison
+        const comparison = String(aVal).localeCompare(String(bVal));
+        return sortDirection === 'asc' ? comparison : -comparison;
+      });
+    }
+
+    return filtered;
+  }, [results, vocabularyFilter, semanticTypeFilter, textSearch, sortColumn, sortDirection]);
 
   // Determine current step based on state
   const getCurrentStep = () => {
@@ -415,6 +486,18 @@ export default function UMLSSearch() {
     setExpandedDomains(newExpanded);
   };
 
+  // Handle column header click for sorting
+  const handleColumnSort = (column: string) => {
+    if (sortColumn === column) {
+      // Toggle direction if same column
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      // New column, default to ascending
+      setSortColumn(column);
+      setSortDirection('asc');
+    }
+  };
+
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -435,7 +518,13 @@ export default function UMLSSearch() {
       });
 
       console.log('[SEARCH] Response:', response);
-      setResults(response.data);
+
+      // Enrich results with concept details (semanticTypes, atomCount, status)
+      console.log('[SEARCH] Enriching results with concept details...');
+      const enrichedResults = await enrichSearchResultsWithConceptDetails(response.data);
+      console.log('[SEARCH] Enriched results:', enrichedResults);
+
+      setResults(enrichedResults);
       setRawResponse(response);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Search failed');
@@ -458,7 +547,11 @@ export default function UMLSSearch() {
             pageSize: 50,
             sortBy: sortBy,
           });
-          setResults(response.data);
+
+          // Enrich results with concept details
+          const enrichedResults = await enrichSearchResultsWithConceptDetails(response.data);
+
+          setResults(enrichedResults);
           setRawResponse(response);
         } catch (err) {
           setError(err instanceof Error ? err.message : 'Search failed');
@@ -601,115 +694,56 @@ export default function UMLSSearch() {
     }
   };
 
-  // NEW: Recursively fetch ALL descendants using source-code descendants API
-  // The descendants endpoint only returns immediate children, so we need to recurse
+  // Fetch ALL descendants using source-code descendants API
+  // NOTE: The /descendants endpoint returns ALL levels (not just immediate children)
+  // NO RECURSION NEEDED - one API call gets the entire hierarchy
   const getAllDescendantsFromSourceCode = async (
     vocabulary: string,
     code: string,
-    visited = new Set<string>(),
     onProgress?: (current: number, phase: string) => void
   ): Promise<Array<{vocabulary: string, code: string, term: string, termType?: string}>> => {
-    // Special handling for RxNorm: NO RECURSION
-    // RxNav API returns bidirectional relationships (SCD<->SBD) causing cycles
-    // Just get all related codes in one call, no recursion needed
-    if (vocabulary === 'RXNORM') {
-      try {
-        console.log(`[RXNORM FLAT] Fetching all related codes for ${code} (non-recursive)`);
-        const immediateDescendants = await getDescendants(vocabulary, code);
-        console.log(`[RXNORM FLAT] → Found ${immediateDescendants.length} related RxNorm codes`);
-
-        return immediateDescendants.map(desc => ({
-          vocabulary,
-          code: desc.code || desc.ui,
-          term: desc.name,
-          termType: (desc as any).termType
-        }));
-      } catch (err) {
-        console.error(`[RXNORM FLAT] Error fetching related codes:`, err);
-        return [];
-      }
-    }
-
-    // For other vocabularies, use recursive traversal
-    // Avoid infinite loops
-    if (visited.has(code)) {
-      return [];
-    }
-    visited.add(code);
-
     try {
-      console.log(`[RECURSIVE] Fetching descendants for ${vocabulary}/${code} (visited: ${visited.size} codes)`);
+      console.log(`[DESCENDANTS] Fetching ALL descendants for ${vocabulary}/${code}`);
 
       if (onProgress) {
-        onProgress(visited.size, `Fetching descendants (${visited.size} codes processed)...`);
+        onProgress(1, `Fetching descendants from ${vocabulary}...`);
       }
 
-      // Get immediate descendants for this code
-      const immediateDescendants = await getDescendants(vocabulary, code);
-      console.log(`[RECURSIVE] → Found ${immediateDescendants.length} immediate descendants for ${code}`);
+      // Single API call gets ALL descendants at all levels
+      const allDescendants = await getDescendants(vocabulary, code);
+      console.log(`[DESCENDANTS] → Found ${allDescendants.length} total descendants (all levels)`);
 
-      // Log the structure of first descendant to debug
-      if (immediateDescendants.length > 0) {
-        console.log(`[RECURSIVE] → First descendant structure:`, immediateDescendants[0]);
-      }
+      // Transform to our format
+      const results: Array<{vocabulary: string, code: string, term: string, termType?: string}> = [];
+      const seen = new Set<string>();
 
-      const allDescendants: Array<{vocabulary: string, code: string, term: string, termType?: string}> = [];
-
-      // Process each immediate descendant
-      for (const desc of immediateDescendants) {
-        // CRITICAL: Extract the actual source code from the descendant
-        // For source-asserted identifiers API, the 'ui' field contains the actual source code
-        // (e.g., SNOMED code "9468002", not an AUI)
+      for (const desc of allDescendants) {
+        // Extract the actual source code
         let descCode = desc.ui || desc.code;
 
         // If the code is a URL, extract the last part
         if (typeof descCode === 'string' && descCode.startsWith('http')) {
           const urlParts = descCode.split('/');
           descCode = urlParts[urlParts.length - 1];
-          console.log(`[RECURSIVE] → Extracted code from URL: ${descCode}`);
         }
 
-        const descTerm = desc.name;
-        const descTermType = (desc as any).termType;
-
-        if (!descCode) {
-          console.warn(`[RECURSIVE] → Skipping descendant with no code:`, desc);
+        if (!descCode || seen.has(descCode)) {
           continue;
         }
 
-        // Skip if already visited
-        if (visited.has(descCode)) {
-          console.log(`[RECURSIVE] → Skipping already visited: ${descCode}`);
-          continue;
-        }
-
-        console.log(`[RECURSIVE] → Processing descendant: ${descCode} - ${descTerm}`);
-
-        // Add this descendant to results
-        allDescendants.push({
+        seen.add(descCode);
+        results.push({
           vocabulary,
           code: descCode,
-          term: descTerm,
-          termType: descTermType
+          term: desc.name,
+          termType: (desc as any).termType
         });
-
-        // Recursively get descendants of this descendant (grandchildren, great-grandchildren, etc.)
-        console.log(`[RECURSIVE] → Recursing into ${descCode} to find its children...`);
-        const childDescendants = await getAllDescendantsFromSourceCode(
-          vocabulary,
-          descCode,
-          visited,
-          onProgress
-        );
-
-        console.log(`[RECURSIVE] → Got ${childDescendants.length} descendants from ${descCode}`);
-        allDescendants.push(...childDescendants);
       }
 
-      console.log(`[RECURSIVE] → Returning ${allDescendants.length} total descendants from ${code}`);
-      return allDescendants;
+      console.log(`[DESCENDANTS] → Returning ${results.length} unique descendants`);
+      return results;
     } catch (err) {
-      console.error(`[RECURSIVE] Error fetching descendants for ${vocabulary}/${code}:`, err);
+      console.error(`[DESCENDANTS] Error fetching descendants for ${vocabulary}/${code}:`, err);
       return [];
     }
   };
@@ -915,9 +949,12 @@ export default function UMLSSearch() {
       let buildVocabulary = node.rootSource || hierarchyData.atom.rootSource;
       let buildCode = node.code || node.ui;
 
-      // CRITICAL: If the selected node is NOT from the standard vocabulary,
-      // we need to find the standard vocabulary atom for the same CUI
-      if (buildVocabulary !== standardVocab) {
+      // CRITICAL: Only switch to RxNorm if building drugs from non-RxNorm codes
+      // Do NOT switch to SNOMED/LOINC - those don't support source code APIs
+      // ICD10CM, LOINC, etc. work fine with source code APIs and will be converted to target vocabularies in Step 3
+      const shouldSwitchVocabulary = buildVocabulary !== standardVocab && standardVocab === 'RXNORM';
+
+      if (shouldSwitchVocabulary) {
         console.log(`Selected vocabulary ${buildVocabulary} is not the standard (${standardVocab}). Looking for standard vocabulary atom...`);
 
         setBuildProgress({ current: 0, total: 0, phase: `Finding ${standardVocab} code for comprehensive coverage...` });
@@ -963,6 +1000,8 @@ export default function UMLSSearch() {
           console.error('Error finding standard vocabulary atom:', error);
           // Continue with original vocabulary if lookup fails
         }
+      } else if (buildVocabulary !== standardVocab) {
+        console.log(`Building from ${buildVocabulary} (standard is ${standardVocab}, but ${buildVocabulary} supports source code APIs). Will convert to target vocabularies in Step 3.`);
       }
 
       console.log(`Starting build from ${buildVocabulary} code ${buildCode}`);
@@ -976,7 +1015,6 @@ export default function UMLSSearch() {
       const allDescendants = await getAllDescendantsFromSourceCode(
         buildVocabulary,
         buildCode,
-        new Set(),
         (current: number, phase: string) => {
           setBuildProgress({ current, total: 0, phase });
         }
@@ -1095,8 +1133,7 @@ export default function UMLSSearch() {
             // Get all descendants for this code in its vocabulary
             const descendants = await getAllDescendantsFromSourceCode(
               result.vocabulary,
-              result.code,
-              new Set()
+              result.code
             );
 
             console.log(`[HIERARCHY EXPAND] Found ${descendants.length} descendants for ${result.code}`);
@@ -1246,10 +1283,6 @@ export default function UMLSSearch() {
         return acc;
       }, {} as Record<string, number>);
       console.log(`[BREAKDOWN] Codes by vocabulary:`, vocabCounts);
-
-      // Show all RxNorm codes for debugging
-      const rxnormCodesList = uniqueCodes.filter(c => c.vocabulary === 'RXNORM');
-      console.log(`[RXNORM CODES] All ${rxnormCodesList.length} RxNorm codes:`, rxnormCodesList.map(c => `${c.code}: ${c.term}`));
 
       setBuildProgress({
         current: uniqueCodes.length,
@@ -1423,29 +1456,117 @@ export default function UMLSSearch() {
       {/* Results Table - Only show if no concept is selected */}
       {results.length > 0 && !selectedConcept && !hierarchyData && (
         <div className="card">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold">
-              Results ({results.length})
-            </h3>
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as 'relevance' | 'alphabetical')}
-              className="text-sm border border-gray-300 rounded px-3 py-1.5 bg-white hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-green-500"
-            >
-              <option value="relevance">Sort: Relevance</option>
-              <option value="alphabetical">Sort: Alphabetical</option>
-            </select>
+          <div className="flex flex-col gap-3 mb-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">
+                Results ({filteredResults.length} {filteredResults.length !== results.length && `of ${results.length}`})
+              </h3>
+              <div className="flex gap-2">
+                <select
+                  value={vocabularyFilter}
+                  onChange={(e) => setVocabularyFilter(e.target.value)}
+                  className="text-sm border border-gray-300 rounded px-3 py-1.5 bg-white hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-green-500"
+                >
+                  <option value="all">Vocabulary: All</option>
+                  {ALL_SEARCH_VOCABULARIES.map(vocab => (
+                    <option key={vocab} value={vocab}>{vocab}</option>
+                  ))}
+                </select>
+                <select
+                  value={semanticTypeFilter}
+                  onChange={(e) => setSemanticTypeFilter(e.target.value)}
+                  className="text-sm border border-gray-300 rounded px-3 py-1.5 bg-white hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-green-500"
+                  disabled={uniqueSemanticTypes.length === 0}
+                >
+                  <option value="all">Semantic Type: All</option>
+                  {uniqueSemanticTypes.map(type => (
+                    <option key={type} value={type}>{type}</option>
+                  ))}
+                </select>
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as 'relevance' | 'alphabetical')}
+                  className="text-sm border border-gray-300 rounded px-3 py-1.5 bg-white hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-green-500"
+                >
+                  <option value="relevance">Sort: Relevance</option>
+                  <option value="alphabetical">Sort: Alphabetical</option>
+                </select>
+              </div>
+            </div>
+            <div className="relative">
+              <input
+                type="text"
+                value={textSearch}
+                onChange={(e) => setTextSearch(e.target.value)}
+                placeholder="Filter by CUI or concept name..."
+                className="input pr-10 w-full text-sm"
+              />
+              <Search className="absolute right-3 top-2.5 h-4 w-4 text-gray-400" />
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full border-collapse">
               <thead>
                 <tr className="border-b border-gray-300">
-                  <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Concept Unique Identifier</th>
-                  <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">Concept Name</th>
+                  <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">
+                    <button
+                      onClick={() => handleColumnSort('ui')}
+                      className="flex items-center gap-1 hover:text-blue-600 transition-colors"
+                    >
+                      CUI
+                      {sortColumn === 'ui' && (
+                        <span>{sortDirection === 'asc' ? '↑' : '↓'}</span>
+                      )}
+                    </button>
+                  </th>
+                  <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">
+                    <button
+                      onClick={() => handleColumnSort('name')}
+                      className="flex items-center gap-1 hover:text-blue-600 transition-colors"
+                    >
+                      Concept Name
+                      {sortColumn === 'name' && (
+                        <span>{sortDirection === 'asc' ? '↑' : '↓'}</span>
+                      )}
+                    </button>
+                  </th>
+                  <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">
+                    <button
+                      onClick={() => handleColumnSort('rootSource')}
+                      className="flex items-center gap-1 hover:text-blue-600 transition-colors"
+                    >
+                      Root Source
+                      {sortColumn === 'rootSource' && (
+                        <span>{sortDirection === 'asc' ? '↑' : '↓'}</span>
+                      )}
+                    </button>
+                  </th>
+                  <th className="text-left py-1 px-2 font-semibold text-gray-700 text-sm">
+                    <button
+                      onClick={() => handleColumnSort('semanticTypes')}
+                      className="flex items-center gap-1 hover:text-blue-600 transition-colors"
+                    >
+                      Semantic Types
+                      {sortColumn === 'semanticTypes' && (
+                        <span>{sortDirection === 'asc' ? '↑' : '↓'}</span>
+                      )}
+                    </button>
+                  </th>
+                  <th className="text-center py-1 px-2 font-semibold text-gray-700 text-sm">
+                    <button
+                      onClick={() => handleColumnSort('atomCount')}
+                      className="flex items-center gap-1 justify-center hover:text-blue-600 transition-colors mx-auto"
+                    >
+                      Atom Count
+                      {sortColumn === 'atomCount' && (
+                        <span>{sortDirection === 'asc' ? '↑' : '↓'}</span>
+                      )}
+                    </button>
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {results.map((result) => (
+                {filteredResults.map((result) => (
                   <tr
                     key={result.ui}
                     onClick={() => handleViewDetails(result.ui)}
@@ -1456,6 +1577,27 @@ export default function UMLSSearch() {
                     </td>
                     <td className="py-1.5 px-2 text-sm text-gray-900">
                       {result.name}
+                    </td>
+                    <td className="py-1.5 px-2">
+                      <span className="inline-block bg-purple-100 text-purple-800 text-xs px-2 py-0.5 rounded">
+                        {result.rootSource}
+                      </span>
+                    </td>
+                    <td className="py-1.5 px-2 text-xs text-gray-700">
+                      {result.semanticTypes && result.semanticTypes.length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {result.semanticTypes.map((st, idx) => (
+                            <span key={idx} className="inline-block bg-blue-50 text-blue-700 text-xs px-1.5 py-0.5 rounded" title={st.name}>
+                              {st.name}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-gray-400 italic">Loading...</span>
+                      )}
+                    </td>
+                    <td className="py-1.5 px-2 text-center text-sm text-gray-700">
+                      {result.atomCount !== undefined ? result.atomCount : <span className="text-gray-400 italic">...</span>}
                     </td>
                   </tr>
                 ))}
@@ -1507,6 +1649,8 @@ export default function UMLSSearch() {
                     const config = DOMAIN_CONFIG[domain as keyof typeof DOMAIN_CONFIG];
                     const isExpanded = expandedDomains.has(domain);
                     const isPrimary = domain === primaryDomain;
+                    // Filter out obsolete terms
+                    const filteredAtoms = atoms.filter((atom: any) => !['OAS', 'OAP'].includes(atom.termType));
 
                     return (
                       <div key={domain} className="border border-gray-200 rounded-md">
@@ -1526,7 +1670,7 @@ export default function UMLSSearch() {
                               {config.label}
                             </span>
                             <span className="text-xs text-gray-500">
-                              ({atoms.length} {atoms.length === 1 ? 'code' : 'codes'})
+                              ({filteredAtoms.length} {filteredAtoms.length === 1 ? 'code' : 'codes'})
                             </span>
                             {isPrimary && (
                               <span className="text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded">
@@ -1545,14 +1689,17 @@ export default function UMLSSearch() {
                                   <tr className="border-b border-gray-200 bg-gray-50">
                                     <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">Code</th>
                                     <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">Vocabulary</th>
+                                    <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">TTY</th>
                                     <th className="text-left py-1 px-2 font-semibold text-gray-700 text-xs">Term</th>
                                   </tr>
                                 </thead>
                                 <tbody>
-                                  {atoms.map((atom: any, idx: number) => {
+                                  {atoms
+                                    .filter((atom: any) => !['OAS', 'OAP'].includes(atom.termType))
+                                    .map((atom: any, idx: number) => {
                                     const supportsHierarchy = HIERARCHICAL_VOCABULARIES.includes(atom.rootSource);
-                                    const standardVocab = getStandardVocabularyForDomain(domain as keyof typeof STANDARD_VOCABULARIES);
-                                    const isStandard = atom.rootSource === standardVocab;
+                                    const ttyLabel = getTTYLabel(atom.termType);
+                                    const isPreferredTerm = atom.termType === 'PT';
                                     return (
                                       <tr
                                         key={idx}
@@ -1565,16 +1712,18 @@ export default function UMLSSearch() {
                                       >
                                         <td className="py-1.5 px-2 font-mono text-xs">{atom.actualCode || atom.code}</td>
                                         <td className="py-1.5 px-2">
-                                          <div className="flex items-center gap-1">
-                                            <span className="inline-block bg-purple-100 text-purple-800 text-xs px-2 py-0.5 rounded">
-                                              {atom.rootSource}
-                                            </span>
-                                            {isStandard && (
-                                              <span className="inline-block bg-green-100 text-green-800 text-xs px-2 py-0.5 rounded font-semibold">
-                                                Standard
-                                              </span>
-                                            )}
-                                          </div>
+                                          <span className="inline-block bg-purple-100 text-purple-800 text-xs px-2 py-0.5 rounded">
+                                            {atom.rootSource}
+                                          </span>
+                                        </td>
+                                        <td className="py-1.5 px-2">
+                                          <span className={`inline-block text-xs px-2 py-0.5 rounded ${
+                                            isPreferredTerm
+                                              ? 'bg-green-100 text-green-800 font-semibold'
+                                              : 'bg-blue-100 text-blue-800'
+                                          }`}>
+                                            {ttyLabel}
+                                          </span>
                                         </td>
                                         <td className="py-1.5 px-2 text-sm">{atom.name}</td>
                                       </tr>

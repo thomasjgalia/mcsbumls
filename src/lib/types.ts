@@ -9,6 +9,8 @@ export interface UMLSSearchResult {
   rootSource: string;      // Root source vocabulary
   sources?: UMLSSource[];  // All vocabulary sources for this concept
   semanticTypes?: Array<{ name: string; uri: string }>;  // Semantic types (STY)
+  atomCount?: number;      // Number of atoms (source codes) for this concept
+  status?: string;         // Current status of the concept
 }
 
 export interface UMLSSource {
