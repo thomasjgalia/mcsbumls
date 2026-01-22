@@ -711,9 +711,9 @@ export async function getCUIAncestors(cui: string): Promise<any[]> {
 
     console.log(`[CUI ANCESTORS] Filtered ${hierarchicalParents.length} hierarchical parent relations`);
     console.log(`[CUI ANCESTORS] Relation patterns found:`, {
-      snomedIsa: hierarchicalParents.filter(r => r.additionalRelationLabel === 'isa').length,
-      medRtMechanism: hierarchicalParents.filter(r => r.additionalRelationLabel === 'has_mechanism_of_action').length,
-      medRtParent: hierarchicalParents.filter(r => r.additionalRelationLabel === 'has_parent').length
+      snomedIsa: hierarchicalParents.filter((r: any) => r.additionalRelationLabel === 'isa').length,
+      medRtMechanism: hierarchicalParents.filter((r: any) => r.additionalRelationLabel === 'has_mechanism_of_action').length,
+      medRtParent: hierarchicalParents.filter((r: any) => r.additionalRelationLabel === 'has_parent').length
     });
 
     // For each hierarchical parent, fetch the atom cluster's atoms to extract parent CUI

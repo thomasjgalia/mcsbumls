@@ -169,10 +169,8 @@ export default function UMLSSearch() {
   const [error, setError] = useState<string | null>(null);
   const [rawResponse, setRawResponse] = useState<any>(null);
   const [selectedConcept, setSelectedConcept] = useState<any>(null);
-  const [loadingDetails, setLoadingDetails] = useState(false);
   const [hierarchyData, setHierarchyData] = useState<any>(null);
   const [loadingHierarchy, setLoadingHierarchy] = useState(false);
-  const [selectedAtom, setSelectedAtom] = useState<any>(null);
   const [buildData, setBuildData] = useState<any>(null);
   const [loadingBuild, setLoadingBuild] = useState(false);
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(new Set());
@@ -564,9 +562,7 @@ export default function UMLSSearch() {
   }, [sortBy]);
 
   const handleViewDetails = async (cui: string) => {
-    setLoadingDetails(true);
     setHierarchyData(null); // Clear previous hierarchy
-    setSelectedAtom(null);
     setExpandedDomains(new Set()); // Reset expanded domains
     try {
       // Fetch atoms from all vocabularies
@@ -581,20 +577,16 @@ export default function UMLSSearch() {
     } catch (err) {
       console.error('Failed to fetch concept details:', err);
       setError('Failed to load concept details');
-    } finally {
-      setLoadingDetails(false);
     }
   };
 
   const handleBackToSearch = () => {
     setSelectedConcept(null);
     setHierarchyData(null);
-    setSelectedAtom(null);
   };
 
   const handleExploreHierarchy = async (atom: any) => {
     setLoadingHierarchy(true);
-    setSelectedAtom(atom);
     setError(null);
 
     try {
@@ -897,7 +889,6 @@ export default function UMLSSearch() {
 
       // Thresholds for warnings
       const WARNING_THRESHOLD = 100; // Warn if > 100 immediate descendants
-      const DANGER_THRESHOLD = 500;  // Strong warning if > 500
 
       if (estimate > WARNING_THRESHOLD) {
         // Show warning modal
